@@ -1,0 +1,4 @@
+[LiandriExchange.LiandriExchangeMutator]
+Class=LiandriExchangeMutator
+Description="Liandri Exchange: Corporate sponsorship economy mutator"
+PerObjectConfig=True
