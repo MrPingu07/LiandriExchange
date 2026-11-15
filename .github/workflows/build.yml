@@ -15,42 +15,56 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download UT2004 Patch 3374 (Windows)
+        id: download
         run: |
           $url = "https://github.com/OldUnreal/UT2004Patches/releases/download/3374-rc3/OldUnreal-UT2004Patch3374-Windows-d906d39a.zip"
           $output = "$env:RUNNER_TEMP\ut2004.zip"
+          Write-Host "Downloading UT2004 from $url..."
           Invoke-WebRequest -Uri $url -OutFile $output
-          Expand-Archive -Path $output -DestinationPath "$env:RUNNER_TEMP\UT2004" -Force
-          $ut2004Dir = (Get-ChildItem "$env:RUNNER_TEMP\UT2004" -Directory).FullName
-          echo "UT2004_DIR=$ut2004Dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $dest = "$env:RUNNER_TEMP\UT2004"
+          Write-Host "Extracting to $dest..."
+          Expand-Archive -Path $output -DestinationPath $dest -Force
+          # Find the System directory (it's at $dest\System)
+          $systemDir = "$dest\System"
+          if (-not (Test-Path $systemDir)) {
+            Write-Error "System directory not found at $systemDir"
+            exit 1
+          }
+          Write-Host "Found System directory: $systemDir"
+          "UT2004_SYSTEM_DIR=$systemDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Copy source to UT2004
+      - name: Copy source to UT2004 System
         run: |
-          $ut2004Dir = $env:UT2004_DIR
-          Copy-Item -Path "$env:GITHUB_WORKSPACE\Classes\*" -Destination "$ut2004Dir\System\" -Recurse -Force
-          Copy-Item -Path "$env:GITHUB_WORKSPACE\Resources\LiandriExchange.int" -Destination "$ut2004Dir\System\" -Force
+          $systemDir = $env:UT2004_SYSTEM_DIR
+          Write-Host "Copying source to $systemDir..."
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\Classes\*" -Destination "$systemDir\" -Recurse -Force
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\Resources\LiandriExchange.int" -Destination "$systemDir\" -Force
+          Write-Host "Files copied successfully"
 
       - name: Compile with UCC
         run: |
-          $ut2004Dir = $env:UT2004_DIR
-          Set-Location "$ut2004Dir\System"
+          $systemDir = $env:UT2004_SYSTEM_DIR
+          Set-Location $systemDir
+          Write-Host "Compiling with UCC in $systemDir..."
           .\UCC.exe make -package=LiandriExchange
           if (-not (Test-Path "LiandriExchange.u")) {
             Write-Error "LiandriExchange.u not found after compilation"
             exit 1
           }
+          Write-Host "Compilation successful!"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: LiandriExchange
-          path: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
+          path: ${{ env.UT2004_SYSTEM_DIR }}\LiandriExchange.u
           retention-days: 30
 
       - name: Create release (on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
+          files: ${{ env.UT2004_SYSTEM_DIR }}\LiandriExchange.u
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
