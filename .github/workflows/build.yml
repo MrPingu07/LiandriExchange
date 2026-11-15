@@ -8,34 +8,45 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Download UT2004 Patch 3374 (Windows)
+      - name: Download UT2004 Installer (OldUnreal)
         id: download
         run: |
-          $url = "https://github.com/OldUnreal/UT2004Patches/releases/download/3374-rc3/OldUnreal-UT2004Patch3374-Windows-d906d39a.zip"
-          $output = "$env:RUNNER_TEMP\ut2004.zip"
-          Write-Host "Downloading UT2004 from $url..."
+          $url = "https://github.com/OldUnreal/FullGameInstallers/releases/download/UT2004/UT2004.exe"
+          $output = "$env:RUNNER_TEMP\UT2004.exe"
+          Write-Host "Downloading UT2004 installer..."
           Invoke-WebRequest -Uri $url -OutFile $output
-          $dest = "$env:RUNNER_TEMP\UT2004"
-          Write-Host "Extracting to $dest..."
-          Expand-Archive -Path $output -DestinationPath $dest -Force
-          # Find the System directory (it's at $dest\System)
-          $systemDir = "$dest\System"
-          if (-not (Test-Path $systemDir)) {
-            Write-Error "System directory not found at $systemDir"
-            exit 1
-          }
-          Write-Host "Found System directory: $systemDir"
-          "UT2004_SYSTEM_DIR=$systemDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "UT2004_INSTALLER=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install UT2004 (silent)
+        run: |
+          $installer = $env:UT2004_INSTALLER
+          $installDir = "$env:RUNNER_TEMP\UT2004"
+          Write-Host "Installing UT2004 to $installDir..."
+          # Silent install flags for UT2004 installer
+          & $installer /S /D=$installDir
+          Write-Host "Installation complete"
+          "UT2004_DIR=$installDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Apply OldUnreal Patch 3374
+        run: |
+          $url = "https://github.com/OldUnreal/UT2004Patches/releases/download/3374-rc3/OldUnreal-UT2004Patch3374-Windows-d906d39a.zip"
+          $output = "$env:RUNNER_TEMP\ut2004patch.zip"
+          $installDir = $env:UT2004_DIR
+          Write-Host "Downloading patch 3374..."
+          Invoke-WebRequest -Uri $url -OutFile "$output"
+          Write-Host "Extracting patch to $installDir..."
+          Expand-Archive -Path $output -DestinationPath $installDir -Force
+          Write-Host "Patch applied"
 
       - name: Copy source to UT2004 System
         run: |
-          $systemDir = $env:UT2004_SYSTEM_DIR
+          $systemDir = "$env:UT2004_DIR\System"
           Write-Host "Copying source to $systemDir..."
           Copy-Item -Path "$env:GITHUB_WORKSPACE\Classes\*" -Destination "$systemDir\" -Recurse -Force
           Copy-Item -Path "$env:GITHUB_WORKSPACE\Resources\LiandriExchange.int" -Destination "$systemDir\" -Force
@@ -43,7 +54,7 @@ jobs:
 
       - name: Compile with UCC
         run: |
-          $systemDir = $env:UT2004_SYSTEM_DIR
+          $systemDir = "$env:UT2004_DIR\System"
           Set-Location $systemDir
           Write-Host "Compiling with UCC in $systemDir..."
           .\UCC.exe make -package=LiandriExchange
@@ -57,14 +68,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LiandriExchange
-          path: ${{ env.UT2004_SYSTEM_DIR }}\LiandriExchange.u
+          path: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
           retention-days: 30
 
       - name: Create release (on tag push)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: ${{ env.UT2004_SYSTEM_DIR }}\LiandriExchange.u
+          files: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
