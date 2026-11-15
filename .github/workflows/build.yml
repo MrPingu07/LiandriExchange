@@ -1,0 +1,56 @@
+name: Build LiandriExchange
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Download UT2004 Patch 3374 (Windows)
+        run: |
+          $url = "https://github.com/OldUnreal/UT2004Patches/releases/download/3374-rc3/OldUnreal-UT2004Patch3374-Windows-d906d39a.zip"
+          $output = "$env:RUNNER_TEMP\ut2004.zip"
+          Invoke-WebRequest -Uri $url -OutFile $output
+          Expand-Archive -Path $output -DestinationPath "$env:RUNNER_TEMP\UT2004" -Force
+          $ut2004Dir = (Get-ChildItem "$env:RUNNER_TEMP\UT2004" -Directory).FullName
+          echo "UT2004_DIR=$ut2004Dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Copy source to UT2004
+        run: |
+          $ut2004Dir = $env:UT2004_DIR
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\Classes\*" -Destination "$ut2004Dir\System\" -Recurse -Force
+          Copy-Item -Path "$env:GITHUB_WORKSPACE\Resources\LiandriExchange.int" -Destination "$ut2004Dir\System\" -Force
+
+      - name: Compile with UCC
+        run: |
+          $ut2004Dir = $env:UT2004_DIR
+          Set-Location "$ut2004Dir\System"
+          .\UCC.exe make -package=LiandriExchange
+          if (-not (Test-Path "LiandriExchange.u")) {
+            Write-Error "LiandriExchange.u not found after compilation"
+            exit 1
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiandriExchange
+          path: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
+          retention-days: 30
+
+      - name: Create release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.UT2004_DIR }}\System\LiandriExchange.u
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
