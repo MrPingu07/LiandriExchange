@@ -17,7 +17,7 @@ jobs:
       - name: Download UT2004 Installer (OldUnreal)
         id: download
         run: |
-          $url = "https://github.com/OldUnreal/FullGameInstallers/releases/download/UT2004/UT2004.exe"
+          $url = "https://github.com/OldUnreal/FullGameInstallers/releases/download/windows-game-installers/UT2004.exe"
           $output = "$env:RUNNER_TEMP\UT2004.exe"
           Write-Host "Downloading UT2004 installer..."
           Invoke-WebRequest -Uri $url -OutFile $output
