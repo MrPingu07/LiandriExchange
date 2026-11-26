@@ -6,6 +6,8 @@ Mutator=(ClassName=LiandriExchange.LiandriExchangeMutator,IconMaterialName=Mutat
 FriendlyName="Liandri Exchange"
 Description="Liandri Mining Corporation Requisition Terminal v3.4.1. Convert combat performance into corporate-sponsored equipment. Combat Credits (CC) earned per frag unlock offensive assets. Casualty Dividends (CD) earned per death unlock survivability tools. 5+5 randomized draft per match. Safe spatial deployment. Fully configurable."
 
+[LiandriExchange.LiandriConfig]
+
 ; -- Currency & Draft Config --
 CCPerFragLabel="CREDIT ACCRUAL PER FRAG"
 CCPerFragDesc="Combat Credits awarded per confirmed elimination. Default: 1"
@@ -26,7 +28,7 @@ FullDivisionRerollDesc="Enable [R]/[SHIFT+R] to refresh all 5 slots in a divisio
 SingleSlotRerollLabel="SINGLE SLOT REROLL"
 SingleSlotRerollDesc="Enable [CTRL+1-5]/[CTRL+SHIFT+1-5] to reroll individual slots. Default: Disabled"
 SingleSlotRerollCostLabel="SINGLE SLOT REROLL COST"
-SingleSlotRerollDesc="Cost for individual slot reroll. Default: 2"
+SingleSlotRerollCostDesc="Cost for individual slot reroll. Default: 2"
 
 ; -- Division I Prices (CC) --
 StimOverclockCostLabel="STIM-OVERCLOCK PRICE"

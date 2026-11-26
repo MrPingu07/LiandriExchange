@@ -1,9 +1,8 @@
 /******************************************************************************
- * LiandriWallet — LinkedReplicationInfo attached to PlayerReplicationInfo
+ * LiandriWallet -- LinkedReplicationInfo attached to PlayerReplicationInfo
  * Tracks Combat Credits (CC), Casualty Dividends (CD), drafted item slots,
  * and handles purchase/replication logic.
  ******************************************************************************/
-
 class LiandriWallet extends LinkedReplicationInfo
 	config(LiandriExchange);
 
@@ -14,8 +13,8 @@ var int ActiveCDSlots[5];
 var bool bDraftComplete;
 var bool bDraftInitialized;
 
-// Config reference
-var ALiandriConfig ConfigObj;
+// Config reference (server-side only; the client builds its own copy for the HUD)
+var LiandriConfig ConfigObj;
 
 // Timer for bot purchases
 var float BotPurchaseTimer;
@@ -31,53 +30,90 @@ replication
 
 simulated function PostBeginPlay()
 {
-	super.PostBeginPlay();
+	Super.PostBeginPlay();
 
-	if (Role == ROLE_Authority)
-	{
-		ConfigObj = Spawn(class'LiandriExchange.ALiandriConfig');
-		BotPurchaseInterval = 5.0 + FRand() * 5.0; // 5-10s random interval
-		SetTimer(BotPurchaseInterval, True);
-	}
+	if (Role != ROLE_Authority)
+		return;
+
+	if (ConfigObj == None)
+		ConfigObj = new(None) class'LiandriExchange.LiandriConfig';
+
+	InitializeDraft();
+
+	BotPurchaseInterval = 5.0 + FRand() * 5.0; // 5-10s random interval
+	SetTimer(BotPurchaseInterval, True);
 }
 
 simulated function Timer()
 {
-	super.Timer();
+	local Bot B;
+	local Pawn P;
 
-	if (Role == ROLE_Authority && bEnableBotPurchases && Owner != None && Owner.IsA('Bot'))
+	if (Role != ROLE_Authority)
+		return;
+
+	if (ConfigObj == None || !ConfigObj.bEnableBotPurchases)
+		return;
+
+	// Find this wallet's owner
+	P = GetOwnerPawn();
+	if (P != None)
 	{
-		BotPurchaseTick();
+		B = Bot(P.Controller);
+		if (B != None && B.Pawn != None)
+			class'LiandriExchange.LiandriBotAI'.static.BotPurchaseTick(Self);
 	}
+
+	BotPurchaseInterval = 5.0 + FRand() * 5.0;
+	SetTimer(BotPurchaseInterval, True);
+}
+
+function LiandriExchangeMutator GetMutator()
+{
+	local LiandriExchangeMutator M;
+
+	foreach AllActors(class'LiandriExchange.LiandriExchangeMutator', M)
+	{
+		if (M != None)
+			return M;
+	}
+	return None;
 }
 
 function InitializeDraft()
 {
 	local LiandriExchangeMutator Mut;
-	local int i, j, PoolIndex, RandomIndex, Temp;
+	local int i, RandomIndex, Temp;
 	local int CCPool[10], CDPool[10];
 	local int DraftSize;
 
-	if (bDraftInitialized)
+	if (Role != ROLE_Authority || bDraftInitialized)
 		return;
 
-	Mut = LiandriExchangeMutator(Level.Game.MutatorList);
-	while (Mut != None && !Mut.IsA('LiandriExchangeMutator'))
-		Mut = LiandriExchangeMutator(Mut.NextMutator);
+	Mut = GetMutator();
 
-	if (Mut == None)
-		return;
+	DraftSize = 5;
+	if (Mut != None)
+	{
+		DraftSize = Mut.DraftPoolSize;
+		for (i = 0; i < 10; i++)
+		{
+			CCPool[i] = Mut.MasterCCPool[i];
+			CDPool[i] = Mut.MasterCDPool[i];
+		}
+	}
+	else
+	{
+		// Fallback: identity pools 0-9
+		for (i = 0; i < 10; i++)
+		{
+			CCPool[i] = i;
+			CDPool[i] = i;
+		}
+	}
 
-	DraftSize = Mut.DraftPoolSize;
 	if (DraftSize > 5) DraftSize = 5;
 	if (DraftSize < 1) DraftSize = 1;
-
-	// Copy master pools
-	for (i = 0; i < 10; i++)
-	{
-		CCPool[i] = Mut.MasterCCPool[i];
-		CDPool[i] = Mut.MasterCDPool[i];
-	}
 
 	// Fisher-Yates shuffle for CC pool
 	for (i = 9; i > 0; i--)
@@ -97,625 +133,606 @@ function InitializeDraft()
 		CDPool[RandomIndex] = Temp;
 	}
 
-	// Take first DraftSize items
-	for (i = 0; i < DraftSize; i++)
-	{
-		ActiveCCSlots[i] = CCPool[i];
-		ActiveCDSlots[i] = CDPool[i];
-	}
+	// Sort first DraftSize items by cost (cheapest first)
+	SortPoolByCost(CCPool, DraftSize, 0, ConfigObj);
+	SortPoolByCost(CDPool, DraftSize, 1, ConfigObj);
 
-	// Fill remaining with -1 (empty)
-	for (i = DraftSize; i < 5; i++)
+	// Take first DraftSize items, empty the rest
+	for (i = 0; i < 5; i++)
 	{
-		ActiveCCSlots[i] = -1;
-		ActiveCDSlots[i] = -1;
+		if (i < DraftSize)
+		{
+			ActiveCCSlots[i] = CCPool[i];
+			ActiveCDSlots[i] = CDPool[i];
+		}
+		else
+		{
+			ActiveCCSlots[i] = -1;
+			ActiveCDSlots[i] = -1;
+		}
 	}
 
 	bDraftComplete = True;
 	bDraftInitialized = True;
 }
 
-reliable server function ServerAddCC(int Amount)
+function ServerAddCC(int Amount)
 {
+	if (Role != ROLE_Authority)
+		return;
+
 	if (Amount > 0)
 		CombatCredits += Amount;
 }
 
-reliable server function ServerAddCD(int Amount)
+function ServerAddCD(int Amount)
 {
+	if (Role != ROLE_Authority)
+		return;
+
 	if (Amount > 0)
 		CasualtyDividends += Amount;
-	else if (Amount < 0)
-		CasualtyDividends = Max(0, CasualtyDividends + Amount); // Penalty
 }
 
-reliable server function ServerPurchaseCC(int SlotIndex)
+function ServerPurchaseCC(int SlotIndex)
 {
-	local xPlayerReplicationInfo PRI;
-	local Pawn P;
-	local LiandriItemData Item;
 	local int Cost;
 	local string ItemName;
+	local Pawn P;
+
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
 
 	if (SlotIndex < 0 || SlotIndex >= 5)
 		return;
 
-	PRI = xPlayerReplicationInfo(Owner);
-	if (PRI == None || PRI.Pawn == None)
+	if (ActiveCCSlots[SlotIndex] == -1)
 		return;
 
-	P = PRI.Pawn;
-	Item = GetCCItemDef(ActiveCCSlots[SlotIndex]);
-	if (Item.MasterIndex == -1)
+	// Deny purchase if dead or spectating
+	P = GetOwnerPawn();
+	if (P == None || P.Health <= 0)
+	{
+		ClientReceiveMessage("CANNOT PURCHASE WHILE DEAD OR SPECTATING", Sound'MenuSounds.denied1');
+		return;
+	}
+
+	if (!class'LiandriExchange.LiandriItemExecutor'.static.IsCCItemEnabled(ActiveCCSlots[SlotIndex], ConfigObj))
 		return;
 
-	Cost = GetCCItemCost(ActiveCCSlots[SlotIndex]);
+	Cost = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemCost(ActiveCCSlots[SlotIndex], ConfigObj);
 	if (CombatCredits < Cost)
 	{
-		ClientReceiveMessage("INSUFFICIENT CREDITS — REQUISITION DENIED", 'MenuSounds.Deny');
+		ClientReceiveMessage("INSUFFICIENT CREDITS -- REQUISITION DENIED", Sound'MenuSounds.denied1');
 		return;
 	}
 
 	CombatCredits -= Cost;
 
-	// Execute item effect
-	ExecuteCCItem(P, ActiveCCSlots[SlotIndex]);
+	if (P != None)
+		class'LiandriExchange.LiandriItemExecutor'.static.ExecuteCCItem(P, ActiveCCSlots[SlotIndex], ConfigObj);
 
-	// Log purchase
-	ItemName = GetCCItemName(ActiveCCSlots[SlotIndex]);
-	ClientReceiveMessage("REQUISITION CONFIRMED: " @ ItemName @ " (-" @ Cost @ " CC)", 'MenuSounds.Select3');
+	ItemName = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemName(ActiveCCSlots[SlotIndex], ConfigObj);
+	ClientReceiveMessage("REQUISITION CONFIRMED: " @ ItemName @ " (-" @ Cost @ " CC)", Sound'MenuSounds.select3');
 }
 
-reliable server function ServerPurchaseCD(int SlotIndex)
+function ServerPurchaseCD(int SlotIndex)
 {
-	local xPlayerReplicationInfo PRI;
-	local Pawn P;
-	local LiandriItemData Item;
 	local int Cost;
 	local string ItemName;
+	local Pawn P;
+
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
 
 	if (SlotIndex < 0 || SlotIndex >= 5)
 		return;
 
-	PRI = xPlayerReplicationInfo(Owner);
-	if (PRI == None || PRI.Pawn == None)
+	if (ActiveCDSlots[SlotIndex] == -1)
 		return;
 
-	P = PRI.Pawn;
-	Item = GetCDItemDef(ActiveCDSlots[SlotIndex]);
-	if (Item.MasterIndex == -1)
+	// Deny purchase if dead or spectating
+	P = GetOwnerPawn();
+	if (P == None || P.Health <= 0)
+	{
+		ClientReceiveMessage("CANNOT PURCHASE WHILE DEAD OR SPECTATING", Sound'MenuSounds.denied1');
+		return;
+	}
+
+	if (!class'LiandriExchange.LiandriItemExecutor'.static.IsCDItemEnabled(ActiveCDSlots[SlotIndex], ConfigObj))
 		return;
 
-	Cost = GetCDItemCost(ActiveCDSlots[SlotIndex]);
+	Cost = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemCost(ActiveCDSlots[SlotIndex], ConfigObj);
 	if (CasualtyDividends < Cost)
 	{
-		ClientReceiveMessage("INSUFFICIENT DIVIDENDS — SUBSIDY DENIED", 'MenuSounds.Deny');
+		ClientReceiveMessage("INSUFFICIENT DIVIDENDS -- SUBSIDY DENIED", Sound'MenuSounds.denied1');
 		return;
 	}
 
 	CasualtyDividends -= Cost;
 
-	// Execute item effect
-	ExecuteCDItem(P, ActiveCDSlots[SlotIndex]);
+	if (P != None)
+		class'LiandriExchange.LiandriItemExecutor'.static.ExecuteCDItem(P, ActiveCDSlots[SlotIndex], ConfigObj);
 
-	// Log purchase
-	ItemName = GetCDItemName(ActiveCDSlots[SlotIndex]);
-	ClientReceiveMessage("SUBSIDY GRANTED: " @ ItemName @ " (-" @ Cost @ " CD)", 'MenuSounds.Select3');
+	ItemName = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemName(ActiveCDSlots[SlotIndex], ConfigObj);
+	ClientReceiveMessage("SUBSIDY GRANTED: " @ ItemName @ " (-" @ Cost @ " CD)", Sound'MenuSounds.select3');
 }
 
-reliable server function ServerRerollCC()
+function ServerRerollCC()
 {
 	local LiandriExchangeMutator Mut;
 	local int i, DraftSize, RandomIndex, Temp;
 	local int CCPool[10];
 	local int Cost;
+	local Pawn P;
 
-	Cost = RerollCost;
-	if (CombatCredits < Cost)
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
+
+	// Deny reroll if dead or spectating
+	P = GetOwnerPawn();
+	if (P == None || P.Health <= 0)
 	{
-		ClientReceiveMessage("INSUFFICIENT CREDITS FOR REROLL — REQUEST DENIED", 'MenuSounds.Deny');
+		ClientReceiveMessage("CANNOT REROLL WHILE DEAD OR SPECTATING", Sound'MenuSounds.denied1');
 		return;
 	}
 
-	Mut = LiandriExchangeMutator(Level.Game.MutatorList);
-	while (Mut != None && !Mut.IsA('LiandriExchangeMutator'))
-		Mut = LiandriExchangeMutator(Mut.NextMutator);
-
-	if (Mut == None)
-		return.
-
-	CombatCredits -= Cost.
-
-	DraftSize = Mut.DraftPoolSize.
-	if (DraftSize > 5) DraftSize = 5.
-
-	// Copy and shuffle master pool
-	for (i = 0; i < 10; i++)
-		CCPool[i] = Mut.MasterCCPool[i].
-
-	for (i = 9; i > 0; i--)
-	{
-		RandomIndex = Rand(i + 1).
-		Temp = CCPool[i].
-		CCPool[i] = CCPool[RandomIndex].
-		CCPool[RandomIndex] = Temp.
-	}
-
-	for (i = 0; i < DraftSize; i++)
-		ActiveCCSlots[i] = CCPool[i].
-	for (i = DraftSize; i < 5; i++)
-		ActiveCCSlots[i] = -1.
-
-	ClientReceiveMessage("DIVISION I REQUISITION POOL REFRESHED (-" @ Cost @ " CC)", 'MenuSounds.Select3').
-}
-
-reliable server function ServerRerollCD()
-{
-	local LiandriExchangeMutator Mut.
-	local int i, DraftSize, RandomIndex, Temp.
-	local int CDPool[10].
-	local int Cost.
-
-	Cost = RerollCost.
-	if (CasualtyDividends < Cost)
-	{
-		ClientReceiveMessage("INSUFFICIENT DIVIDENDS FOR REROLL — REQUEST DENIED", 'MenuSounds.Deny').
-		return.
-	}
-
-	Mut = LiandriExchangeMutator(Level.Game.MutatorList).
-	while (Mut != None && !Mut.IsA('LiandriExchangeMutator'))
-		Mut = LiandriExchangeMutator(Mut.NextMutator).
-
-	if (Mut == None)
-		return.
-
-	CasualtyDividends -= Cost.
-
-	DraftSize = Mut.DraftPoolSize.
-	if (DraftSize > 5) DraftSize = 5.
-
-	for (i = 0; i < 10; i++)
-		CDPool[i] = Mut.MasterCDPool[i].
-
-	for (i = 9; i > 0; i--)
-	{
-		RandomIndex = Rand(i + 1).
-		Temp = CDPool[i].
-		CDPool[i] = CDPool[RandomIndex].
-		CDPool[RandomIndex] = Temp.
-	}
-
-	for (i = 0; i < DraftSize; i++)
-		ActiveCDSlots[i] = CDPool[i].
-	for (i = DraftSize; i < 5; i++)
-		ActiveCDSlots[i] = -1.
-
-	ClientReceiveMessage("DIVISION II SUBSIDY POOL REFRESHED (-" @ Cost @ " CD)", 'MenuSounds.Select3').
-}
-
-reliable server function ServerSingleSlotRerollCC(int SlotIndex)
-{
-	local LiandriExchangeMutator Mut.
-	local int i, RandomIndex, Temp.
-	local int CCPool[10].
-	local int Cost.
-	local bool bFound.
-
-	if (!LiandriExchangeMutator(Level.Game.MutatorList).bSingleSlotReroll)
-		return.
-
-	Cost = LiandriExchangeMutator(Level.Game.MutatorList).SingleSlotRerollCost.
+	Cost = ConfigObj.RerollCCCost;
 	if (CombatCredits < Cost)
 	{
-		ClientReceiveMessage("INSUFFICIENT CREDITS FOR SINGLE REROLL", 'MenuSounds.Deny').
-		return.
+		ClientReceiveMessage("INSUFFICIENT CREDITS FOR REROLL -- REQUEST DENIED", Sound'MenuSounds.denied1');
+		return;
+	}
+
+	Mut = GetMutator();
+	if (Mut == None)
+		return;
+
+	CombatCredits -= Cost;
+
+	DraftSize = Mut.DraftPoolSize;
+	if (DraftSize > 5) DraftSize = 5;
+	if (DraftSize < 1) DraftSize = 1;
+
+	for (i = 0; i < 10; i++)
+		CCPool[i] = Mut.MasterCCPool[i];
+
+	for (i = 9; i > 0; i--)
+	{
+		RandomIndex = Rand(i + 1);
+		Temp = CCPool[i];
+		CCPool[i] = CCPool[RandomIndex];
+		CCPool[RandomIndex] = Temp;
+	}
+
+	// Sort first DraftSize items by cost (cheapest first)
+	SortPoolByCost(CCPool, DraftSize, 0, ConfigObj);
+
+	for (i = 0; i < 5; i++)
+	{
+		if (i < DraftSize)
+			ActiveCCSlots[i] = CCPool[i];
+		else
+			ActiveCCSlots[i] = -1;
+	}
+
+	ClientReceiveMessage("DIVISION I REQUISITION POOL REFRESHED (-" $ Cost $ " CC)", Sound'MenuSounds.Select3');
+}
+
+function ServerRerollCD()
+{
+	local LiandriExchangeMutator Mut;
+	local int i, DraftSize, RandomIndex, Temp;
+	local int CDPool[10];
+	local int Cost;
+	local Pawn P;
+
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
+
+	// Deny reroll if dead or spectating
+	P = GetOwnerPawn();
+	if (P == None || P.Health <= 0)
+	{
+		ClientReceiveMessage("CANNOT REROLL WHILE DEAD OR SPECTATING", Sound'MenuSounds.denied1');
+		return;
+	}
+
+	Cost = ConfigObj.RerollCDCost;
+	if (CasualtyDividends < Cost)
+	{
+		ClientReceiveMessage("INSUFFICIENT DIVIDENDS FOR REROLL -- REQUEST DENIED", Sound'MenuSounds.denied1');
+		return;
+	}
+
+	Mut = GetMutator();
+	if (Mut == None)
+		return;
+
+	CasualtyDividends -= Cost;
+
+	DraftSize = Mut.DraftPoolSize;
+	if (DraftSize > 5) DraftSize = 5;
+	if (DraftSize < 1) DraftSize = 1;
+
+	for (i = 0; i < 10; i++)
+		CDPool[i] = Mut.MasterCDPool[i];
+
+	for (i = 9; i > 0; i--)
+	{
+		RandomIndex = Rand(i + 1);
+		Temp = CDPool[i];
+		CDPool[i] = CDPool[RandomIndex];
+		CDPool[RandomIndex] = Temp;
+	}
+
+	// Sort first DraftSize items by cost (cheapest first)
+	SortPoolByCost(CDPool, DraftSize, 1, ConfigObj);
+
+	for (i = 0; i < 5; i++)
+	{
+		if (i < DraftSize)
+			ActiveCDSlots[i] = CDPool[i];
+		else
+			ActiveCDSlots[i] = -1;
+	}
+
+	ClientReceiveMessage("DIVISION II SUBSIDY POOL REFRESHED (-" $ Cost $ " CD)", Sound'MenuSounds.Select3');
+}
+
+function ServerSingleSlotRerollCC(int SlotIndex)
+{
+	local LiandriExchangeMutator Mut;
+	local int i, j, RandomIndex;
+	local int CCPool[10];
+	local int Cost;
+	local int ValidCount;
+	local int Temp;
+
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
+
+	if (!ConfigObj.bSingleSlotReroll)
+		return;
+
+	Cost = ConfigObj.SingleSlotRerollCost;
+	if (CombatCredits < Cost)
+	{
+		ClientReceiveMessage("INSUFFICIENT CREDITS FOR SLOT REROLL", Sound'MenuSounds.denied1');
+		return;
 	}
 
 	if (SlotIndex < 0 || SlotIndex >= 5 || ActiveCCSlots[SlotIndex] == -1)
-		return.
+		return;
 
-	CombatCredits -= Cost.
-
-	Mut = LiandriExchangeMutator(Level.Game.MutatorList).
-	while (Mut != None && !Mut.IsA('LiandriExchangeMutator'))
-		Mut = LiandriExchangeMutator(Mut.NextMutator).
-
+	Mut = GetMutator();
 	if (Mut == None)
-		return.
+		return;
 
-	// Build pool of available items not already in active slots
+	CombatCredits -= Cost;
+
+	if (!ConfigObj.bSingleSlotReroll)
+		return;
+
 	for (i = 0; i < 10; i++)
-		CCPool[i] = Mut.MasterCCPool[i].
+		CCPool[i] = Mut.MasterCCPool[i];
 
 	// Remove currently active items from pool
 	for (i = 0; i < 5; i++)
 	{
-		if (ActiveCCSlots[i] != -1)
+		if (i != SlotIndex && ActiveCCSlots[i] != -1)
 		{
-			for (int j = 0; j < 10; j++)
+			for (j = 0; j < 10; j++)
 			{
 				if (CCPool[j] == ActiveCCSlots[i])
 				{
-					CCPool[j] = -1.
-					break.
+					CCPool[j] = -1;
+					break;
 				}
 			}
 		}
 	}
 
-	// Compact pool
-	int ValidCount = 0.
+	ValidCount = 0;
 	for (i = 0; i < 10; i++)
 	{
-		if (CCPool[i] != -1)
-			CCPool[ValidCount++] = CCPool[i].
+		if (CCPool[i] != -1 && class'LiandriExchange.LiandriItemExecutor'.static.IsCCItemEnabled(CCPool[i], ConfigObj))
+		{
+			CCPool[ValidCount] = CCPool[i];
+			ValidCount++;
+		}
 	}
 
 	if (ValidCount == 0)
-		return.
+		return;
 
-	RandomIndex = Rand(ValidCount).
-	ActiveCCSlots[SlotIndex] = CCPool[RandomIndex].
+	for (i = ValidCount - 1; i > 0; i--)
+	{
+		RandomIndex = Rand(i + 1);
+		Temp = CCPool[i];
+		CCPool[i] = CCPool[RandomIndex];
+		CCPool[RandomIndex] = Temp;
+	}
 
-	ClientReceiveMessage("SLOT " @ (SlotIndex+1) @ " REROLLED (-" @ Cost @ " CC)", 'MenuSounds.Select3').
+	// Sort by cost (cheapest first)
+	if (ValidCount > 1)
+	{
+		SortPoolByCost(CCPool, ValidCount, 0, ConfigObj);
+	}
+
+	ActiveCCSlots[SlotIndex] = CCPool[0];
+	ClientReceiveMessage("SLOT " $ (SlotIndex + 1) $ " REROLLED (-" $ Cost $ " CC)", Sound'MenuSounds.Select3');
 }
 
-reliable server function ServerSingleSlotRerollCD(int SlotIndex)
+function ServerSingleSlotRerollCD(int SlotIndex)
 {
-	local LiandriExchangeMutator Mut.
-	local int i, RandomIndex.
-	local int CDPool[10].
-	local int Cost.
-	local int ValidCount.
+	local LiandriExchangeMutator Mut;
+	local int i, j, RandomIndex;
+	local int CDPool[10];
+	local int Cost;
+	local int ValidCount;
+	local int Temp;
 
-	if (!LiandriExchangeMutator(Level.Game.MutatorList).bSingleSlotReroll)
-		return.
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
 
-	Cost = LiandriExchangeMutator(Level.Game.MutatorList).SingleSlotRerollCost.
+	if (!ConfigObj.bSingleSlotReroll)
+		return;
+
+	Cost = ConfigObj.SingleSlotRerollCost;
 	if (CasualtyDividends < Cost)
 	{
-		ClientReceiveMessage("INSUFFICIENT DIVIDENDS FOR SINGLE REROLL", 'MenuSounds.Deny').
-		return.
+		ClientReceiveMessage("INSUFFICIENT DIVIDENDS FOR SLOT REROLL", Sound'MenuSounds.denied1');
+		return;
 	}
 
 	if (SlotIndex < 0 || SlotIndex >= 5 || ActiveCDSlots[SlotIndex] == -1)
-		return.
+		return;
 
-	CasualtyDividends -= Cost.
-
-	Mut = LiandriExchangeMutator(Level.Game.MutatorList).
-	while (Mut != None && !Mut.IsA('LiandriExchangeMutator'))
-		Mut = LiandriExchangeMutator(Mut.NextMutator).
-
+	Mut = GetMutator();
 	if (Mut == None)
-		return.
+		return;
+
+	CasualtyDividends -= Cost;
+
+	if (!ConfigObj.bSingleSlotReroll)
+		return;
 
 	for (i = 0; i < 10; i++)
-		CDPool[i] = Mut.MasterCDPool[i].
+		CDPool[i] = Mut.MasterCDPool[i];
 
+	// Remove currently active items from pool
 	for (i = 0; i < 5; i++)
 	{
-		if (ActiveCDSlots[i] != -1)
+		if (i != SlotIndex && ActiveCDSlots[i] != -1)
 		{
-			for (int j = 0; j < 10; j++)
+			for (j = 0; j < 10; j++)
 			{
 				if (CDPool[j] == ActiveCDSlots[i])
 				{
-					CDPool[j] = -1.
-					break.
+					CDPool[j] = -1;
+					break;
 				}
 			}
 		}
 	}
 
-	ValidCount = 0.
+	ValidCount = 0;
 	for (i = 0; i < 10; i++)
 	{
-		if (CDPool[i] != -1)
-			CDPool[ValidCount++] = CDPool[i].
+		if (CDPool[i] != -1 && class'LiandriExchange.LiandriItemExecutor'.static.IsCDItemEnabled(CDPool[i], ConfigObj))
+		{
+			CDPool[ValidCount] = CDPool[i];
+			ValidCount++;
+		}
 	}
 
 	if (ValidCount == 0)
-		return.
+		return;
 
-	RandomIndex = Rand(ValidCount).
-	ActiveCDSlots[SlotIndex] = CDPool[RandomIndex].
-
-	ClientReceiveMessage("SLOT " @ (SlotIndex+1) @ " REROLLED (-" @ Cost @ " CD)", 'MenuSounds.Select3').
-}
-
-simulated function ClientReceiveMessage(string Msg, optional Sound SoundFX)
-{
-	local PlayerController PC.
-
-	PC = PlayerController(Owner).
-	if (PC != None)
+	for (i = ValidCount - 1; i > 0; i--)
 	{
-		PC.ClientMessage(Msg).
-		if (SoundFX != None)
-			PC.ClientPlaySound(SoundFX).
+		RandomIndex = Rand(i + 1);
+		Temp = CDPool[i];
+		CDPool[i] = CDPool[RandomIndex];
+		CDPool[RandomIndex] = Temp;
 	}
-}
 
-// ===== ITEM DEFINITION HELPERS =====
-
-function LiandriItemData GetCCItemDef(int MasterIndex)
-{
-	local LiandriItemData Item.
-	local class<ALiandriConfig> ConfigClass.
-
-	Item.MasterIndex = -1.
-	if (MasterIndex < 0 || MasterIndex > 9)
-		return Item.
-
-	ConfigClass = class'LiandriExchange.ALiandriConfig'.
-	switch (MasterIndex)
+	// Sort by cost (cheapest first)
+	if (ValidCount > 1)
 	{
-		case 0: Item.Name = "Stim-Overclock"; Item.Cost = GetConfigInt(ConfigClass, "StimOverclockCost", 3); Item.FlavorText = "Removes all thermal safety limiters. Voiding weapon warranty is encouraged."; Item.bIsVehicle = False; Item.EffectClassName = "XPickups.UDamage"; break. // Berserk via UDamage pickup logic
-		case 1: Item.Name = "Overtime Accelerator"; Item.Cost = GetConfigInt(ConfigClass, "OvertimeAcceleratorCost", 5); Item.FlavorText = "Livestock-grade cardiac stimulant. Knee cartilage degradation is not covered."; Item.bIsVehicle = False; break.
-		case 2: Item.Name = "Hostile Takeover"; Item.Cost = GetConfigInt(ConfigClass, "HostileTakeoverCost", 5); Item.FlavorText = "Floods your weapon with unshielded isotopes. Expect 6th-degree burns."; Item.bIsVehicle = False; Item.EffectClassName = "XPickups.UDamage"; break.
-		case 3: Item.Name = "Quad-Jump Prototype"; Item.Cost = GetConfigInt(ConfigClass, "QuadJumpCost", 5); Item.FlavorText = "Quad-jumping capable boots. Thrusters salvaged from an aircraft crash."; Item.bIsVehicle = False; break.
-		case 4: Item.Name = "Vampiric Clause"; Item.Cost = GetConfigInt(ConfigClass, "VampiricClauseCost", 6); Item.FlavorText = "Experimental blood-recycling suit. Gross but efficient."; Item.bIsVehicle = False; break.
-		case 5: Item.Name = "Recon Striker"; Item.Cost = GetConfigInt(ConfigClass, "ReconStrikerCost", 8); Item.FlavorText = "90% recycled mining scrap. Seatbelts removed to save on shipping costs."; Item.bIsVehicle = True; Item.VehicleClassName = "Onslaught.ONSHoverBike"; break.
-		case 6: Item.Name = "Air-Support"; Item.Cost = GetConfigInt(ConfigClass, "AirSupportCost", 10); Item.FlavorText = "Parachutes and ejector seats not included."; Item.bIsVehicle = True; Item.VehicleClassName = "Onslaught.ONSHoverCraft"; break.
-		case 7: Item.Name = "Hellbender Merger"; Item.Cost = GetConfigInt(ConfigClass, "HellbenderCost", 11); Item.FlavorText = "Rear turret wiring exposed. Bring a friend to absorb shrapnel."; Item.bIsVehicle = True; Item.VehicleClassName = "OnslaughtFull.ONSAttackCraft"; break.
-		case 8: Item.Name = "Heavy Litigation"; Item.Cost = GetConfigInt(ConfigClass, "HeavyLitigationCost", 15); Item.FlavorText = "Cabin ventilation is currently broken. Hearing loss and exhaust poisoning are not covered by your contract."; Item.bIsVehicle = True; Item.VehicleClassName = "Onslaught.ONSGoliath"; break.
-		case 9: Item.Name = "Boardroom Clearer"; Item.Cost = GetConfigInt(ConfigClass, "BoardroomClearerCost", 18); Item.FlavorText = "Long-term radiation safe radius exceeds the size of this arena."; Item.bIsVehicle = False; Item.EffectClassName = "XWeapons.Redeemer"; break.
+		SortPoolByCost(CDPool, ValidCount, 1, ConfigObj);
 	}
-	Item.MasterIndex = MasterIndex.
-	Item.Division = 0.
-	return Item.
+
+	ActiveCDSlots[SlotIndex] = CDPool[0];
+	ClientReceiveMessage("SLOT " $ (SlotIndex + 1) $ " REROLLED (-" $ Cost $ " CD)", Sound'MenuSounds.Select3');
 }
 
-function LiandriItemData GetCDItemDef(int MasterIndex)
+function Pawn GetOwnerPawn()
 {
-	local LiandriItemData Item.
-	local class<ALiandriConfig> ConfigClass.
+	local Pawn P;
+	local Controller C;
 
-	Item.MasterIndex = -1.
-	if (MasterIndex < 0 || MasterIndex > 9)
-		return Item.
-
-	ConfigClass = class'LiandriExchange.ALiandriConfig'.
-	switch (MasterIndex)
+	if (Owner == None)
 	{
-		case 0: Item.Name = "Emergency Resupply"; Item.Cost = GetConfigInt(ConfigClass, "EmergencyResupplyCost", 3); Item.FlavorText = "Recycled munitions scraped off the arena floor. May still contain trace amounts of previous contenders."; Item.bIsVehicle = False; break.
-		case 1: Item.Name = "Personal Translocator"; Item.Cost = GetConfigInt(ConfigClass, "PersonalTranslocatorCost", 2); Item.FlavorText = "Quantum teleporter. Only occasionally leaves teeth behind."; Item.bIsVehicle = False; Item.EffectClassName = "XWeapons.Translocator"; break.
-		case 2: Item.Name = "Bio-Hazard Disposal"; Item.Cost = GetConfigInt(ConfigClass, "BioHazardCost", 3); Item.FlavorText = "Toxic sludge tank strapped to your spine. Do not fall backward."; Item.bIsVehicle = False; Item.EffectClassName = "XWeapons.BioRifle"; break.
-		case 3: Item.Name = "Kinetic Severance"; Item.Cost = GetConfigInt(ConfigClass, "KineticSeveranceCost", 4); Item.FlavorText = "Deflects shrapnel away from you."; Item.bIsVehicle = False; break.
-		case 4: Item.Name = "Spider-Mine Surplus"; Item.Cost = GetConfigInt(ConfigClass, "SpiderMineCost", 4); Item.FlavorText = "Surplus factory rejects."; Item.bIsVehicle = False; Item.EffectClassName = "XWeapons.MineLayer"; break.
-		case 5: Item.Name = "Adrenaline Shot"; Item.Cost = GetConfigInt(ConfigClass, "AdrenalineShotCost", 5); Item.FlavorText = "Progressively regenerates health. If you don't mind running with a needle stuck on you."; Item.bIsVehicle = False; break.
-		case 6: Item.Name = "Ghost Protocol"; Item.Cost = GetConfigInt(ConfigClass, "GhostProtocolCost", 5); Item.FlavorText = "Pills that make you effectively transparent by separating your molecules. Don't worry, fully vanishing is rare."; Item.bIsVehicle = False; break.
-		case 7: Item.Name = "Vitality Bailout"; Item.Cost = GetConfigInt(ConfigClass, "VitalityBailoutCost", 8); Item.FlavorText = "Chemical sludge that numbs fatal trauma."; Item.bIsVehicle = False; break.
-		case 8: Item.Name = "Stationary Severance"; Item.Cost = GetConfigInt(ConfigClass, "StationarySeveranceCost", 10); Item.FlavorText = "Cannot retreat, turn fully, or protect your spine."; Item.bIsVehicle = True; break. // Random turret class
-		case 9: Item.Name = "Anti-Trust Package"; Item.Cost = GetConfigInt(ConfigClass, "AntiTrustCost", 15); Item.FlavorText = "Detonation only after projectile outside of chamber not guaranteed."; Item.bIsVehicle = False; Item.EffectClassName = "XWeapons.AVRiL"; break.
+		return None;
 	}
-	Item.MasterIndex = MasterIndex.
-	Item.Division = 1.
-	return Item.
-}
 
-function int GetCCItemCost(int MasterIndex)
-{
-	local LiandriItemData Item.
-	Item = GetCCItemDef(MasterIndex).
-	return Item.Cost.
-}
-
-function int GetCDItemCost(int MasterIndex)
-{
-	local LiandriItemData Item.
-	Item = GetCDItemDef(MasterIndex).
-	return Item.Cost.
-}
-
-function string GetCCItemName(int MasterIndex)
-{
-	local LiandriItemData Item.
-	Item = GetCCItemDef(MasterIndex).
-	return Item.Name.
-}
-
-function string GetCDItemName(int MasterIndex)
-{
-	local LiandriItemData Item.
-	Item = GetCDItemDef(MasterIndex).
-	return Item.Name.
-}
-
-// ===== ITEM EXECUTION =====
-
-function ExecuteCCItem(Pawn P, int MasterIndex)
-{
-	local xPawn XP.
-	local Vehicle V.
-	local Inventory Inv.
-
-	XP = xPawn(P).
-	if (XP == None)
-		return.
-
-	switch (MasterIndex)
+	P = Pawn(Owner);
+	if (P != None)
 	{
-		case 0: // Stim-Overclock - Berserk 20s
-			XP.GivePowerup(class'XPickups.Berserk', 20.0).
-			break.
-		case 1: // Overtime Accelerator - 2x speed/jump 30s
-			XP.GivePowerup(class'XPickups.BootsOfFlight', 30.0). // Closest: jump boost
-			// Custom speed boost handled via adrenaline combo or custom powerup
-			XP.GroundSpeed *= 2.0.
-			XP.AirControl *= 2.0.
-			break.
-		case 2: // Hostile Takeover - UDamage 30s
-			XP.GivePowerup(class'XPickups.UDamage', 30.0).
-			break.
-		case 3: // Quad-Jump Prototype - Quad jump 120s
-			XP.GivePowerup(class'XPickups.BootsOfFlight', 120.0).
-			XP.MaxMultiJump = 3. // Quad jump = 3 extra jumps
-			break.
-		case 4: // Vampiric Clause - 50% lifesteal 30s
-			// Custom: would need a custom powerup; for now grant Regen + Vampire
-			XP.GivePowerup(class'XPickups.Regen', 30.0).
-			break.
-		case 5: // Recon Striker - Scorpion
-			if (LiandriExchangeMutator(Level.Game.MutatorList).bEnableVehicles)
-				LiandriDeployment.SafeSpawnVehicle(P, class'Onslaught.ONSHoverBike', V).
-			break.
-		case 6: // Air-Support - Raptor
-			if (LiandriExchangeMutator(Level.Game.MutatorList).bEnableVehicles)
-				LiandriDeployment.SafeSpawnVehicle(P, class'Onslaught.ONSHoverCraft', V).
-			break.
-		case 7: // Hellbender Merger - Hellbender
-			if (LiandriExchangeMutator(Level.Game.MutatorList).bEnableVehicles)
-				LiandriDeployment.SafeSpawnVehicle(P, class'OnslaughtFull.ONSAttackCraft', V).
-			break.
-		case 8: // Heavy Litigation - Goliath
-			if (LiandriExchangeMutator(Level.Game.MutatorList).bEnableVehicles)
-				LiandriDeployment.SafeSpawnVehicle(P, class'Onslaught.ONSGoliath', V).
-			break.
-		case 9: // Boardroom Clearer - Redeemer (1 shot)
-			Inv = XP.CreateInventory(class'XWeapons.Redeemer').
-			if (Inv != None)
-			{
-				Inv.AmmoCount = 1.
-				XP.AddWeapon(Inv).
-			}
-			break.
+		return P;
 	}
-}
 
-function ExecuteCDItem(Pawn P, int MasterIndex)
-{
-	local xPawn XP.
-	local Inventory Inv.
-	local class<Turret> TurretClass.
-	local Pawn TurretPawn.
-	local bool bUseAssaultTurret.
-
-	XP = xPawn(P).
-	if (XP == None)
-		return.
-
-	switch (MasterIndex)
+	C = Controller(Owner.Owner);
+	if (C != None)
 	{
-		case 0: // Emergency Resupply - Full ammo (non-Redeemer/IonPainter)
-			ResupplyAmmo(XP).
-			break.
-		case 1: // Personal Translocator
-			Inv = XP.FindInventoryType(class'XWeapons.Translocator').
-			if (Inv != None)
-				XP.ThrowWeapon(Inv).
-			Inv = XP.CreateInventory(class'XWeapons.Translocator').
-			if (Inv != None)
-				XP.AddWeapon(Inv).
-			break.
-		case 2: // Bio-Hazard Disposal - BioRifle + 50 Shield
-			Inv = XP.CreateInventory(class'XWeapons.BioRifle').
-			if (Inv != None)
-			{
-				Inv.AmmoCount = Inv.MaxAmmo.
-				XP.AddWeapon(Inv).
-			}
-			XP.ShieldStrength += 50.
-			if (XP.ShieldStrength > 150) XP.ShieldStrength = 150.
-			break.
-		case 3: // Kinetic Severance - ADD 100 Super Shield
-			XP.ShieldStrength += 100.
-			if (XP.ShieldStrength > 250) XP.ShieldStrength = 250. // Hard cap higher than normal
-			break.
-		case 4: // Spider-Mine Surplus - Mine Layer full ammo
-			Inv = XP.CreateInventory(class'XWeapons.MineLayer').
-			if (Inv != None)
-			{
-				Inv.AmmoCount = Inv.MaxAmmo.
-				XP.AddWeapon(Inv).
-			}
-			break.
-		case 5: // Adrenaline Shot - Health regen (ComboDefensive)
-			XP.ActivateAdrenalineCombo('ComboDefensive').
-			break.
-		case 6: // Ghost Protocol - Invisibility 25s + Speed
-			XP.GivePowerup(class'XPickups.Invisibility', 25.0).
-			XP.GroundSpeed *= 1.3.
-			break.
-		case 7: // Vitality Bailout - SET Health 300 (overheal)
-			XP.Health = 300.
-			if (XP.Health > 300) XP.Health = 300.
-			break.
-		case 8: // Stationary Severance - Random turret
-			bUseAssaultTurret = (Rand(2) == 0).
-			if (bUseAssaultTurret)
-				TurretClass = class'UT2k4Assault.ASTurret_Minigun'.
-			else
-				TurretClass = class'Onslaught.ONSManualGunPawn'.
-			LiandriDeployment.SafeSpawnTurret(P, TurretClass, TurretPawn).
-			break.
-		case 9: // Anti-Trust Package - AVRiL full ammo
-			Inv = XP.CreateInventory(class'XWeapons.AVRiL').
-			if (Inv != None)
-			{
-				Inv.AmmoCount = Inv.MaxAmmo.
-				XP.AddWeapon(Inv).
-			}
-			break.
+		return C.Pawn;
 	}
+
+	return None;
 }
 
-function ResupplyAmmo(xPawn P)
+function LiandriExchangeMutator FindMutator()
 {
-	local Inventory Inv.
-	local Weapon W.
+	local LiandriExchangeMutator M;
 
-	for (Inv = P.Inventory; Inv != None; Inv = Inv.Inventory)
+	foreach AllActors(class'LiandriExchange.LiandriExchangeMutator', M)
 	{
-		if (Inv.IsA('Weapon'))
+		if (M != None)
 		{
-			W = Weapon(Inv).
-			// Skip Redeemer and Ion Painter
-			if (!W.IsA('Redeemer') && !W.IsA('IonPainter'))
-			{
-				W.AmmoCount = W.MaxAmmo.
-			}
+			return M;
 		}
 	}
+	return None;
 }
 
 function BotPurchaseTick()
 {
-	local Bot B.
-	local int i, AffordableCC, AffordableCD.
+	local LiandriExchangeMutator Mut;
+	local int i, Slot;
+	local int CCItems[5], CDItems[5];
+	local int NumCC, NumCD;
 
-	B = Bot(Owner).
-	if (B == None || B.Pawn == None)
-		return.
+	if (Role != ROLE_Authority || ConfigObj == None)
+		return;
 
-	// Simple: randomly try to buy something affordable
-	AffordableCC = -1.
-	AffordableCD = -1.
+	if (!ConfigObj.bEnableBotPurchases)
+		return;
 
+	Mut = GetMutator();
+	if (Mut == None)
+		return;
+
+	NumCC = 0;
+	NumCD = 0;
+
+	// Find affordable CC items
 	for (i = 0; i < 5; i++)
 	{
-		if (ActiveCCSlots[i] != -1 && CombatCredits >= GetCCItemCost(ActiveCCSlots[i]))
+		if (ActiveCCSlots[i] != -1)
 		{
-			if (AffordableCC == -1 || FRand() < 0.5)
-				AffordableCC = i.
-		}
-		if (ActiveCDSlots[i] != -1 && CasualtyDividends >= GetCDItemCost(ActiveCDSlots[i]))
-		{
-			if (AffordableCD == -1 || FRand() < 0.5)
-				AffordableCD = i.
+			if (class'LiandriExchange.LiandriItemExecutor'.static.IsCCItemEnabled(ActiveCCSlots[i], ConfigObj))
+			{
+				if (CombatCredits >= class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemCost(ActiveCCSlots[i], ConfigObj))
+				{
+					CCItems[NumCC] = i;
+					NumCC++;
+				}
+			}
 		}
 	}
 
-	if (AffordableCC != -1 && FRand() < 0.3)
-		ServerPurchaseCC(AffordableCC).
-	else if (AffordableCD != -1 && FRand() < 0.3)
-		ServerPurchaseCD(AffordableCD).
+	// Find affordable CD items
+	for (i = 0; i < 5; i++)
+	{
+		if (ActiveCDSlots[i] != -1)
+		{
+			if (class'LiandriExchange.LiandriItemExecutor'.static.IsCDItemEnabled(ActiveCDSlots[i], ConfigObj))
+			{
+				if (CasualtyDividends >= class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemCost(ActiveCDSlots[i], ConfigObj))
+				{
+					CDItems[NumCD] = i;
+					NumCD++;
+				}
+			}
+		}
+	}
+
+	if (NumCC + NumCD == 0)
+		return;
+
+	// 30% chance to buy something
+	if (FRand() > 0.3)
+		return;
+
+	if (NumCC > 0 && (NumCD == 0 || FRand() < 0.5))
+	{
+		Slot = CCItems[Rand(NumCC)];
+		ServerPurchaseCC(Slot);
+	}
+	else if (NumCD > 0)
+	{
+		Slot = CDItems[Rand(NumCD)];
+		ServerPurchaseCD(Slot);
+	}
 }
 
+simulated function ClientReceiveMessage(string Msg, optional Sound SoundFX)
+{
+	local PlayerController PC;
 
+	if (Role != ROLE_Authority)
+		return;
 
+	PC = PlayerController(GetOwnerController());
+	if (PC != None)
+	{
+		PC.ClientMessage(Msg);
+		if (SoundFX != None)
+			PC.ClientPlaySound(SoundFX);
+	}
+}
+
+function Controller GetOwnerController()
+{
+	local Pawn P;
+	local Controller C;
+
+	if (Owner == None)
+	{
+		return None;
+	}
+
+	P = Pawn(Owner);
+	if (P != None)
+	{
+		return P.Controller;
+	}
+
+	C = Controller(Owner.Owner);
+	if (C != None)
+	{
+		return C;
+	}
+
+	return None;
+}
+
+// Helper: sorts first Count items of Pool by item cost (cheapest first)
+// Division: 0 = CC, 1 = CD
+function SortPoolByCost(out int Pool[10], int Count, int Division, LiandriConfig Cfg)
+{
+	local int i, j, Temp, CostA, CostB;
+
+	if (Cfg == None)
+		return;
+
+	// Simple bubble sort for small arrays (Count <= 5)
+	for (i = 0; i < Count - 1; i++)
+	{
+		for (j = 0; j < Count - 1 - i; j++)
+		{
+			if (Division == 0)
+			{
+				CostA = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemCost(Pool[j], Cfg);
+				CostB = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemCost(Pool[j + 1], Cfg);
+			}
+			else
+			{
+				CostA = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemCost(Pool[j], Cfg);
+				CostB = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemCost(Pool[j + 1], Cfg);
+			}
+
+			if (CostA > CostB)
+			{
+				Temp = Pool[j];
+				Pool[j] = Pool[j + 1];
+				Pool[j + 1] = Temp;
+			}
+		}
+	}
+}
 
 defaultproperties
 {

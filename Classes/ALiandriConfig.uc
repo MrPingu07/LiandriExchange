@@ -1,13 +1,11 @@
 /******************************************************************************
- * ALiandriConfig — Configuration object (config(LiandriExchange))
+ * ALiandriConfig -- Configuration object (config(LiandriExchange))
  * All tunable values exposed for .ini and Mutator Config GUI.
  * Prefixed with 'A' to ensure early parse order.
  ******************************************************************************/
-
 class ALiandriConfig extends Object
 	config(LiandriExchange)
 	perObjectConfig;
-
 // Currency & Draft
 var config int CCPerFrag;
 var config int CDPerDeath;
@@ -19,6 +17,8 @@ var config bool bEnableBotPurchases;
 var config bool bFullDivisionReroll;
 var config bool bSingleSlotReroll;
 var config int SingleSlotRerollCost;
+var config int RerollCCCost;          // Cost to reroll Division I (CC)
+var config int RerollCDCost;          // Cost to reroll Division II (CD)
 
 // Item Prices - Division I (CC)
 var config int StimOverclockCost;
@@ -80,6 +80,8 @@ defaultproperties
 	bFullDivisionReroll=True
 	bSingleSlotReroll=False
 	SingleSlotRerollCost=2
+	RerollCCCost=5
+	RerollCDCost=5
 
 	// Division I Prices (CC)
 	StimOverclockCost=3

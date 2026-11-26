@@ -1,8 +1,8 @@
 /******************************************************************************
- * LiandriExchangeMutator — Main mutator entry point
+ * LiandriExchangeMutator -- Main mutator entry point
  * Attaches LiandriWallet to PlayerReplicationInfo, handles draft, currency.
+ * Spawns LiandriGameRules for kill/death tracking.
  ******************************************************************************/
-
 class LiandriExchangeMutator extends Mutator
 	config(LiandriExchange)
 	placeable;
@@ -17,27 +17,27 @@ var config bool bEnableBotPurchases;
 var config bool bFullDivisionReroll;
 var config bool bSingleSlotReroll;
 var config int SingleSlotRerollCost;
+var config int RerollCCCost;          // Cost to reroll Division I (CC)
+var config int RerollCDCost;          // Cost to reroll Division II (CD)
 
-var ALiandriConfig ConfigObj;
+var LiandriConfig ConfigObj;
+var LiandriGameRules GameRulesObj;
+var LiandriVampireGameRules GameRulesObjVampire;
 
 // Master item pools (indices 0-9 for each division)
 var int MasterCCPool[10];
 var int MasterCDPool[10];
 
-// Replication
-replication
-{
-	reliable if (Role == ROLE_Authority)
-		ConfigObj, MasterCCPool, MasterCDPool;
-}
-
 function PostBeginPlay()
 {
 	local int i;
-	super.PostBeginPlay();
+	local LiandriWallet Wallet;
+	local PlayerReplicationInfo PRI;
 
-	// Load config object
-	ConfigObj = Spawn(class'LiandriExchange.ALiandriConfig');
+	Super.PostBeginPlay();
+
+	// Non-Actor config object: instantiate with "new", not Spawn.
+	ConfigObj = new(None) class'LiandriExchange.LiandriConfig';
 	if (ConfigObj != None)
 	{
 		CCPerFrag = ConfigObj.CCPerFrag;
@@ -50,6 +50,8 @@ function PostBeginPlay()
 		bFullDivisionReroll = ConfigObj.bFullDivisionReroll;
 		bSingleSlotReroll = ConfigObj.bSingleSlotReroll;
 		SingleSlotRerollCost = ConfigObj.SingleSlotRerollCost;
+		RerollCCCost = ConfigObj.RerollCCCost;
+		RerollCDCost = ConfigObj.RerollCDCost;
 	}
 
 	// Initialize master pools (0-9)
@@ -59,136 +61,173 @@ function PostBeginPlay()
 		MasterCDPool[i] = i;
 	}
 
-	// Attach wallets to existing players
-	AttachWalletsToAllPlayers();
-}
+	if (Role != ROLE_Authority)
+		return;
 
-function AttachWalletsToAllPlayers()
-{
-	local PlayerReplicationInfo PRI;
-	local LiandriWallet Wallet;
-
-	for (PRI = Level.Game.GRI.PRI; PRI != None; PRI = PRI.NextPlayer)
+	// Spawn GameRules for kill/death tracking
+	GameRulesObj = Spawn(class'LiandriExchange.LiandriGameRules');
+	if (GameRulesObj != None)
 	{
-		if (PRI.Player != None && PRI.Wallet == None)
+		GameRulesObj.CCPerFrag = CCPerFrag;
+		GameRulesObj.CDPerDeath = CDPerDeath;
+		GameRulesObj.SuicidePenalty = SuicidePenalty;
+
+		if (Level.Game.GameRulesModifiers == None)
+			Level.Game.GameRulesModifiers = GameRulesObj;
+		else
+			Level.Game.GameRulesModifiers.AddGameRules(GameRulesObj);
+	}
+
+	// Spawn VampireGameRules for life-steal (50% of damage dealt heals player, capped at 3× max health)
+	GameRulesObjVampire = Spawn(class'LiandriExchange.LiandriVampireGameRules');
+	if (GameRulesObjVampire != None)
+	{
+		if (Level.Game.GameRulesModifiers == None)
+			Level.Game.GameRulesModifiers = GameRulesObjVampire;
+		else
+			Level.Game.GameRulesModifiers.AddGameRules(GameRulesObjVampire);
+	}
+
+	// Attach wallets to players that already exist
+	if (Level.GRI != None)
+	{
+		for (i = 0; i < Level.GRI.PRIArray.Length; i++)
 		{
-			Wallet = Spawn(class'LiandriExchange.LiandriWallet', PRI);
-			if (Wallet != None)
+			PRI = Level.GRI.PRIArray[i];
+			if (PRI != None)
 			{
-				PRI.Wallet = Wallet;
-				Wallet.InitializeDraft();
+				Wallet = GetOrCreateWallet(PRI);
+				// Nudge the client so its HUD interaction is installed.
+				if (Wallet != None && PlayerController(PRI.Owner) != None)
+					PlayerController(PRI.Owner).ReceiveLocalizedMessage(class'LiandriExchange.LiandriHUDMessage', 1);
 			}
 		}
 	}
 }
 
-function MutatorTakeDamage(int ActualDamage, Controller InstigatedBy, Vector HitLocation, Vector Momentum, class<DamageType> DamageType, Actor HitActor, Actor DamageCauser)
+function LiandriWallet FindWallet(PlayerReplicationInfo PRI)
 {
-	local xPlayerReplicationInfo VictimPRI, KillerPRI;
-	local LiandriWallet VictimWallet, KillerWallet;
-	local bool bIsSuicide;
+	local LinkedReplicationInfo L;
 
-	super.MutatorTakeDamage(ActualDamage, InstigatedBy, HitLocation, Momentum, DamageType, HitActor, DamageCauser);
+	if (PRI == None)
+		return None;
 
-	if (HitActor == None || HitActor.PlayerReplicationInfo == None)
-		return;
-
-	VictimPRI = xPlayerReplicationInfo(HitActor.PlayerReplicationInfo);
-	VictimWallet = LiandriWallet(VictimPRI.Wallet);
-
-	// Determine if suicide (fall/world damage OR DamageType == Suicide OR KilledBy == Self)
-	bIsSuicide = False;
-	if (DamageCauser == HitActor)
-		bIsSuicide = True;
-	else if (DamageType != None && DamageType.IsA('Suicide'))
-		bIsSuicide = True;
-	else if (DamageType != None && (DamageType.IsA('FallDamage') || DamageType.IsA('WorldDamage')))
-		bIsSuicide = True;
-
-	if (VictimWallet != None)
+	L = PRI.CustomReplicationInfo;
+	while (L != None)
 	{
-		if (bIsSuicide)
-		{
-			if (SuicidePenalty == 0)
-				VictimWallet.ServerAddCD(0); // Explicit no-grant
-			else
-				VictimWallet.ServerAddCD(SuicidePenalty); // Negative or custom penalty
-		}
-		else
-		{
-			// Normal death: grant CD
-			VictimWallet.ServerAddCD(CDPerDeath);
-		}
+		if (LiandriWallet(L) != None)
+			return LiandriWallet(L);
+		L = L.NextReplicationInfo;
 	}
 
-	// Frag credit to killer (if different player)
-	if (InstigatedBy != None && InstigatedBy.PlayerReplicationInfo != None && InstigatedBy.PlayerReplicationInfo != VictimPRI)
-	{
-		KillerPRI = xPlayerReplicationInfo(InstigatedBy.PlayerReplicationInfo);
-		KillerWallet = LiandriWallet(KillerPRI.Wallet);
-		if (KillerWallet != None)
-		{
-			KillerWallet.ServerAddCC(CCPerFrag);
-		}
-	}
+	return None;
 }
 
-function PostLogin(playerpawn NewPlayer)
+function LiandriWallet GetOrCreateWallet(PlayerReplicationInfo PRI)
 {
-	local xPlayerReplicationInfo PRI;
 	local LiandriWallet Wallet;
 
-	super.PostLogin(NewPlayer);
+	Wallet = FindWallet(PRI);
+	if (Wallet != None || PRI == None)
+		return Wallet;
 
-	PRI = xPlayerReplicationInfo(NewPlayer.PlayerReplicationInfo);
-	if (PRI != None && PRI.Wallet == None)
+	Wallet = Spawn(class'LiandriExchange.LiandriWallet', PRI);
+	if (Wallet != None)
 	{
-		Wallet = Spawn(class'LiandriExchange.LiandriWallet', PRI);
-		if (Wallet != None)
-		{
-			PRI.Wallet = Wallet;
-			Wallet.InitializeDraft();
-		}
+		Wallet.ConfigObj = ConfigObj;
+		Wallet.NextReplicationInfo = PRI.CustomReplicationInfo;
+		PRI.CustomReplicationInfo = Wallet;
+		Wallet.InitializeDraft();
+	}
+
+	return Wallet;
+}
+
+function ModifyPlayer(Pawn Other)
+{
+	local PlayerController PC;
+
+	Super.ModifyPlayer(Other);
+
+	if (Role != ROLE_Authority || Other == None)
+		return;
+
+	GetOrCreateWallet(Other.PlayerReplicationInfo);
+
+	PC = PlayerController(Other.Controller);
+	if (PC != None)
+	{
+		PC.ReceiveLocalizedMessage(class'LiandriExchange.LiandriHUDMessage', 1);
 	}
 }
 
 function bool CheckReplacement(Actor Other, out byte bSuperRelevant)
 {
-	local xPlayerReplicationInfo PRI;
-	local LiandriWallet Wallet;
-
 	if (Other.IsA('PlayerReplicationInfo'))
-	{
-		PRI = xPlayerReplicationInfo(Other);
-		if (PRI.Wallet == None)
-		{
-			Wallet = Spawn(class'LiandriExchange.LiandriWallet', PRI);
-			if (Wallet != None)
-			{
-				PRI.Wallet = Wallet;
-				Wallet.InitializeDraft();
-			}
-		}
-	}
+		GetOrCreateWallet(PlayerReplicationInfo(Other));
 
 	return Super.CheckReplacement(Other, bSuperRelevant);
 }
 
-function InitMutator(string Options, out string ErrorMessage)
+// Fallback console entry point, e.g. "mutate liandri" to reopen the terminal.
+function Mutate(string MutateString, PlayerController Sender)
 {
-	local string Opt;
-	super.InitMutator(Options, ErrorMessage);
+	local LiandriWallet Wallet;
+	local int Slot;
 
-	// Parse URL options if any
-	while (GetNextOption(Options, Opt))
+	Super.Mutate(MutateString, Sender);
+
+	if (Role != ROLE_Authority || Sender == None)
+		return;
+
+	Wallet = GetOrCreateWallet(Sender.PlayerReplicationInfo);
+	if (Wallet == None)
+		return;
+
+	if (Left(MutateString, 12) ~= "LiandriBuyCC")
 	{
-		if (ParseOption(Options, "CCPerFrag") != "")
-			CCPerFrag = int(ParseOption(Options, "CCPerFrag"));
-		if (ParseOption(Options, "CDPerDeath") != "")
-			CDPerDeath = int(ParseOption(Options, "CDPerDeath"));
-		if (ParseOption(Options, "DraftPoolSize") != "")
-			DraftPoolSize = int(ParseOption(Options, "DraftPoolSize"));
+		Slot = int(Mid(MutateString, 12));
+		Wallet.ServerPurchaseCC(Slot);
 	}
+	else if (Left(MutateString, 12) ~= "LiandriBuyCD")
+	{
+		Slot = int(Mid(MutateString, 12));
+		Wallet.ServerPurchaseCD(Slot);
+	}
+	else if (Left(MutateString, 15) ~= "LiandriRerollCC")
+	{
+		Wallet.ServerRerollCC();
+	}
+	else if (Left(MutateString, 15) ~= "LiandriRerollCD")
+	{
+		Wallet.ServerRerollCD();
+	}
+	else if (Left(MutateString, 13) ~= "LiandriSlotCC")
+	{
+		Slot = int(Mid(MutateString, 13));
+		Wallet.ServerSingleSlotRerollCC(Slot);
+	}
+	else if (Left(MutateString, 13) ~= "LiandriSlotCD")
+	{
+		Slot = int(Mid(MutateString, 13));
+		Wallet.ServerSingleSlotRerollCD(Slot);
+	}
+	else if (MutateString ~= "LiandriMenu")
+	{
+		// Open native GUI buy menu (VMSMod style)
+		Sender.ClientOpenMenu("LiandriExchange.LiandriBuyMenu", false, "", "");
+	}
+	else if (MutateString ~= "Liandri")
+	{
+		Sender.ReceiveLocalizedMessage(class'LiandriExchange.LiandriHUDMessage', 1);
+	}
+}
+
+// MutatorFillPlayInfo for config GUI
+function MutatorFillPlayInfo(PlayInfo PlayInfo)
+{
+	class'LiandriExchange.LiandriConfig'.static.FillPlayInfo(PlayInfo);
+	Super.MutatorFillPlayInfo(PlayInfo);
 }
 
 defaultproperties
@@ -203,7 +242,10 @@ defaultproperties
 	bFullDivisionReroll=True
 	bSingleSlotReroll=False
 	SingleSlotRerollCost=2
+	RerollCCCost=5
+	RerollCDCost=5
 	GroupName="LiandriExchange"
 	FriendlyName="Liandri Exchange"
-	Description="Corporate sponsorship economy mutator. Trade performance for requisitions."
+	Description="Liandri Mining Corporation Requisition Terminal v3.4.1. Convert combat performance into corporate-sponsored equipment. Combat Credits (CC) earned per frag unlock offensive assets. Casualty Dividends (CD) earned per death unlock survivability tools. 5+5 randomized draft per match. Safe spatial deployment. Fully configurable."
+	ConfigMenuClassName="LiandriExchange.LiandriConfigGUI"
 }

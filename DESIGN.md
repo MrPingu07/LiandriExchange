@@ -234,7 +234,7 @@ static function bool SafeSpawnVehicle(Pawn Owner, class<Vehicle> VClass, out Veh
 ╚══════════════════════════════════════════════════════════════╝
 ```
 - **No mouse input** — pure keyboard, retains movement/look
-- **Color coding:** Gold (affordable), Amber (close), Red (insufficient), Gray (purchased/consumed)
+- **Color coding:** Green (affordable), Amber (close), Red (insufficient), Gray (purchased/consumed/unavailable)
 - **Vehicle slots:** Show `DEPLOY` instead of `READY` — triggers clearance check
 
 ### 4.5 Mutator Config GUI (PlayInfo Integration)

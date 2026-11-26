@@ -1,203 +1,69 @@
 /******************************************************************************
- * LiandriDeployment — Static utility for safe spatial deployment
- * Verifies clearance before spawning vehicles/turrets, auto-seats player.
+ * LiandriDeployment -- Simple deployment utility
+ * Spawns vehicles/turrets in front of the player without complex traces.
  ******************************************************************************/
-
 class LiandriDeployment extends Object;
-
-const DEPLOY_BASE_DISTANCE = 300.0;
-const DEPLOY_Z_OFFSET = 50.0;
-const DEPLOY_OFFSET_MULT = 1.5;
-const FLOOR_TRACE_DIST = 200.0;
-const CEILING_TRACE_DIST = 500.0;
-const MAX_DEPLOY_ATTEMPTS = 9;
 
 static function bool SafeSpawnVehicle(Pawn Owner, class<Vehicle> VClass, out Vehicle Spawned)
 {
-	local Vector BaseLoc, Forward, TestLoc;
-	local Rotator SpawnRot;
-	local float Radius, Height;
-	local int i, j;
-	local Vector Offsets[9];
-	local Actor HitActor;
-	local Vector HitLoc, HitNorm;
-	local bool bClear;
+	local Vector SpawnLoc;
 	local Vehicle V;
-	local Controller C;
+	local PlayerController PC;
 
 	if (Owner == None || VClass == None)
 		return False;
 
-	// Get vehicle collision bounds
-	GetClassDefaultObject(VClass).GetCollisionRadiusAndHeight(Radius, Height);
+	SpawnLoc = Owner.Location + Vector(Owner.Rotation) * 300.0;
+	SpawnLoc.Z += 50.0;
 
-	// Base spawn location: in front of player
-	Forward = Vector(Owner.Rotation);
-	BaseLoc = Owner.Location + Forward * DEPLOY_BASE_DISTANCE;
-	BaseLoc.Z += DEPLOY_Z_OFFSET;
-	SpawnRot = Owner.Rotation;
+	// Enable vehicles so they render (SVehicleFactory.uc destroys them if bAllowVehicles is off).
+	Owner.Level.Game.bAllowVehicles = True;
 
-	// Generate test offsets: center, 4 cardinal, 4 diagonal
-	Offsets[0] = Vect(0, 0, 0);
-	Offsets[1] = Vect(Radius * DEPLOY_OFFSET_MULT, 0, 0);
-	Offsets[2] = Vect(-Radius * DEPLOY_OFFSET_MULT, 0, 0);
-	Offsets[3] = Vect(0, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[4] = Vect(0, -Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[5] = Vect(Radius * DEPLOY_OFFSET_MULT, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[6] = Vect(Radius * DEPLOY_OFFSET_MULT, -Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[7] = Vect(-Radius * DEPLOY_OFFSET_MULT, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[8] = Vect(-Radius * DEPLOY_OFFSET_MULT, -Radius * DEPLOY_OFFSET_MULT, 0);
+	V = Owner.Spawn(VClass, Owner, 'LiandriVehicle', SpawnLoc, Owner.Rotation);
+	if (V == None)
+		return False;
 
-	// Try each offset
-	for (i = 0; i < MAX_DEPLOY_ATTEMPTS; i++)
-	{
-		TestLoc = BaseLoc + Offsets[i];
+	Spawned = V;
 
-		// Check floor clearance
-		HitActor = Owner.Trace(HitLoc, HitNorm, TestLoc, TestLoc - Vect(0, 0, FLOOR_TRACE_DIST), False, Vect(Radius, Radius, Height));
-		if (HitActor == None)
-			continue; // No floor
+	// Align vehicle team with the owner's team so the native team-lock check
+	// in TryToDrive does not reject entry.
+	if (Owner.PlayerReplicationInfo != None && Owner.PlayerReplicationInfo.Team != None)
+		V.SetTeamNum(Owner.PlayerReplicationInfo.Team.TeamIndex);
 
-		// Check ceiling clearance
-		HitActor = Owner.Trace(HitLoc, HitNorm, TestLoc, TestLoc + Vect(0, 0, CEILING_TRACE_DIST), False, Vect(Radius, Radius, Height));
-		if (HitActor != None)
-			continue; // Ceiling too low
+	// Vehicles are hidden by default; show them.
+	V.bHidden = False;
 
-		// Check collision at spawn point (encroachment)
-		bClear = True;
-		ForEach OverlappingActors(class'Actor', HitActor, TestLoc, Vect(Radius, Radius, Height))
-		{
-			if (HitActor != Owner && HitActor.bBlockActors && !HitActor.IsA('PlayerReplicationInfo'))
-			{
-				bClear = False;
-				break;
-			}
-		}
+	// Auto-seat the purchasing player (driver seat)
+	V.TryToDrive(Owner);
 
-		if (!bClear)
-			continue;
+	PC = PlayerController(Owner.Controller);
+	if (PC != None)
+		PC.ClientPlaySound(Sound'MenuSounds.select3');
 
-		// All checks passed - spawn vehicle
-		V = Spawn(VClass, , , TestLoc, SpawnRot);
-		if (V != None)
-		{
-			Spawned = V;
-
-			// Auto-seat the purchasing player (driver seat)
-			V.TryToDrive(Owner);
-
-			// Lock driver seat for owner (anti-carjack)
-			V.bVehicleLocked = True;
-			V.Driver = Owner; // Ensure driver reference
-
-			// Play spawn sound
-			Owner.ClientPlaySound(sound'AnnouncerMain.Incoming');
-
-			return True;
-		}
-	}
-
-	// All attempts failed
-	Owner.ClientMessage("DEPLOYMENT ABORTED: INSUFFICIENT CLEARANCE — LIABILITY WAIVER VOID");
-	Owner.ClientPlaySound(sound'MenuSounds.Deny');
-	return False;
+	return True;
 }
 
 static function bool SafeSpawnTurret(Pawn Owner, class<Pawn> TurretClass, out Pawn Spawned)
 {
-	local Vector BaseLoc, Forward, TestLoc;
-	local Rotator SpawnRot;
-	local float Radius, Height;
-	local int i;
-	local Vector Offsets[9];
-	local Actor HitActor;
-	local Vector HitLoc, HitNorm;
-	local bool bClear;
+	local Vector SpawnLoc;
 	local Pawn Turret;
+	local PlayerController PC;
 
 	if (Owner == None || TurretClass == None)
 		return False;
 
-	// Get turret collision bounds
-	GetClassDefaultObject(TurretClass).GetCollisionRadiusAndHeight(Radius, Height);
+	SpawnLoc = Owner.Location + Vector(Owner.Rotation) * 300.0;
+	SpawnLoc.Z += 50.0;
 
-	// Base spawn location: in front of player
-	Forward = Vector(Owner.Rotation);
-	BaseLoc = Owner.Location + Forward * DEPLOY_BASE_DISTANCE;
-	BaseLoc.Z += DEPLOY_Z_OFFSET;
-	SpawnRot = Owner.Rotation;
-	SpawnRot.Yaw = Owner.Rotation.Yaw; // Face same direction as player
-
-	// Generate test offsets (same pattern)
-	Offsets[0] = Vect(0, 0, 0);
-	Offsets[1] = Vect(Radius * DEPLOY_OFFSET_MULT, 0, 0);
-	Offsets[2] = Vect(-Radius * DEPLOY_OFFSET_MULT, 0, 0);
-	Offsets[3] = Vect(0, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[4] = Vect(0, -Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[5] = Vect(Radius * DEPLOY_OFFSET_MULT, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[6] = Vect(Radius * DEPLOY_OFFSET_MULT, -Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[7] = Vect(-Radius * DEPLOY_OFFSET_MULT, Radius * DEPLOY_OFFSET_MULT, 0);
-	Offsets[8] = Vect(-Radius * DEPLOY_OFFSET_MULT, -Radius * DEPLOY_OFFSET_MULT, 0);
-
-	for (i = 0; i < MAX_DEPLOY_ATTEMPTS; i++)
-	{
-		TestLoc = BaseLoc + Offsets[i];
-
-		// Floor check
-		HitActor = Owner.Trace(HitLoc, HitNorm, TestLoc, TestLoc - Vect(0, 0, FLOOR_TRACE_DIST), False, Vect(Radius, Radius, Height));
-		if (HitActor == None)
-			continue;
-
-		// Ceiling check
-		HitActor = Owner.Trace(HitLoc, HitNorm, TestLoc, TestLoc + Vect(0, 0, CEILING_TRACE_DIST), False, Vect(Radius, Radius, Height));
-		if (HitActor != None)
-			continue;
-
-		// Encroachment check
-		bClear = True;
-		ForEach OverlappingActors(class'Actor', HitActor, TestLoc, Vect(Radius, Radius, Height))
-		{
-			if (HitActor != Owner && HitActor.bBlockActors && !HitActor.IsA('PlayerReplicationInfo'))
-			{
-				bClear = False;
-				break;
-			}
-		}
-
-		if (!bClear)
-			continue;
-
-		Turret = Spawn(TurretClass, , , TestLoc, SpawnRot);
-		if (Turret != None)
-		{
-			Spawned = Turret;
-
-			// Play spawn sound
-			Owner.ClientPlaySound(sound'AnnouncerMain.Incoming');
-
-			return True;
-		}
-	}
-
-	Owner.ClientMessage("DEPLOYMENT ABORTED: INSUFFICIENT CLEARANCE — LIABILITY WAIVER VOID");
-	Owner.ClientPlaySound(sound'MenuSounds.Deny');
-	return False;
-}
-
-static function bool CheckClearance(Vector Loc, float Radius, float Height)
-{
-	local Actor HitActor;
-	local Vector HitLoc, HitNorm;
-
-	// Floor
-	HitActor = Trace(HitLoc, HitNorm, Loc, Loc - Vect(0, 0, FLOOR_TRACE_DIST), False, Vect(Radius, Radius, Height));
-	if (HitActor == None)
+	Turret = Owner.Spawn(TurretClass, Owner, 'LiandriTurret', SpawnLoc, Owner.Rotation);
+	if (Turret == None)
 		return False;
 
-	// Ceiling
-	HitActor = Trace(HitLoc, HitNorm, Loc, Loc + Vect(0, 0, CEILING_TRACE_DIST), False, Vect(Radius, Radius, Height));
-	if (HitActor != None)
-		return False;
+	Spawned = Turret;
+
+	PC = PlayerController(Owner.Controller);
+	if (PC != None)
+		PC.ClientPlaySound(Sound'MenuSounds.select3');
 
 	return True;
 }

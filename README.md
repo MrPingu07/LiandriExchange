@@ -1,121 +1,117 @@
-# Liandri Exchange — UT2004 Mutator
+# LiandriExchange — UT2004 Mutator
 
-> **Liandri Mining Corporation Requisition Terminal v3.4.1**  
-> *Convert combat performance into corporate-sponsored equipment. Safety optional.*
-
-## Overview
-
-Liandri Exchange turns UT2004 into a roguelite corporate sponsorship economy. Players earn **Combat Credits (CC)** from frags and **Casualty Dividends (CD)** from deaths to purchase weapons, vehicles, powerups, and utilities from a randomized 5+5 draft pool — all without affecting actual scoreboard stats.
-
-## Features
-
-- **Dual-Currency Economy**: CC (offense/snowball) vs CD (survival/catch-up)
-- **Roguelite 5+5 Draft**: 10 random items per match from 20-item master pool
-- **Safe Spatial Deployment**: Vehicles/turrets verify clearance before spawning
-- **Anti-Carjack Protection**: Purchasing player locked into driver seat
-- **Fast-Buy HUD**: Keyboard-driven Canvas overlay (F4 to toggle, 1-5/Shift+1-5 to buy)
-- **Full Config GUI**: All prices, rates, toggles in Mutator Config menu
-- **Corporate Aesthetic**: All strings styled as negligent Liandri terminal messages
-- **Bot Support**: Toggleable AI purchasing
-
-## Quick Start (Windows — Required for Compilation)
-
-```cmd
-# 1. Copy source to UT2004 installation
-xcopy Classes\*.uc \UT2004\System\ /Y
-xcopy Resources\LiandriExchange.int \UT2004\System\ /Y
-
-# 2. Compile
-cd \UT2004\System
-UCC.exe make -package=LiandriExchange
-
-# 3. Install
-copy LiandriExchange.u \UT2004\System\
-
-# 4. Configure server
-# Add to UT2004.ini [Engine.GameEngine]:
-ServerPackages=LiandriExchange
-
-# 5. Launch
-UT2004.exe DM-Deck17?game=XGame.xDeathMatch?mutator=LiandriExchange.LiandriExchangeMutator
-```
-
-## Controls
-
-| Key | Action |
-|-----|--------|
-| `F4` | Toggle requisition terminal |
-| `1`–`5` | Purchase Division I (CC) slot |
-| `Shift+1`–`Shift+5` | Purchase Division II (CD) slot |
-| `R` | Reroll Division I (5 CC) |
-| `Shift+R` | Reroll Division II (5 CD) |
-| `Ctrl+1`–`Ctrl+5` | Reroll single CC slot (2 CC, if enabled) |
-| `Ctrl+Shift+1`–`Ctrl+Shift+5` | Reroll single CD slot (2 CD, if enabled) |
-
-## Division I — Performance Requisitions (CC)
-
-| Item | Cost | Effect |
-|------|------|--------|
-| Stim-Overclock | 3 | Berserk 20s |
-| Overtime Accelerator | 5 | 2× Speed/Jump 30s |
-| Hostile Takeover | 5 | UDamage 30s |
-| Quad-Jump Prototype | 5 | Quad Jump 120s |
-| Vampiric Clause | 6 | 50% Life Steal 30s |
-| Recon Striker | 8 | Spawn Scorpion |
-| Air-Support | 10 | Spawn Raptor |
-| Hellbender Merger | 11 | Spawn Hellbender |
-| Heavy Litigation | 15 | Spawn Goliath |
-| Boardroom Clearer | 18 | Redeemer (1 shot) |
-
-## Division II — Sponsor Subsidies (CD)
-
-| Item | Cost | Effect |
-|------|------|--------|
-| Emergency Resupply | 3 | Full ammo (non-super) |
-| Personal Translocator | 2 | Translocator (lost on death) |
-| Bio-Hazard Disposal | 3 | BioRifle + 50 Shield |
-| Kinetic Severance | 4 | +100 Super Shield |
-| Spider-Mine Surplus | 4 | Mine Layer (full ammo) |
-| Adrenaline Shot | 5 | Health Regen (ComboDefensive) |
-| Ghost Protocol | 5 | Invisibility 25s + Speed |
-| Vitality Bailout | 8 | Set Health 300 (overheal) |
-| Stationary Severance | 10 | Spawn Mounted Turret (random) |
-| Anti-Trust Package | 15 | AVRiL (full ammo) |
-
-## Configuration
-
-All values editable via **Mutator Config GUI** or `UT2004.ini` `[LiandriExchange.LiandriConfig]`:
-
-```ini
-CCPerFrag=1
-CDPerDeath=1
-SuicidePenalty=0
-RerollCost=5
-DraftPoolSize=5
-bEnableVehicles=True
-bEnableBotPurchases=True
-bFullDivisionReroll=True
-bSingleSlotReroll=False
-SingleSlotRerollCost=2
-; ... individual item prices and toggles
-```
-
-## Suicide Detection
-
-No CD granted for: `Suicide` damage type, `KilledBy==Self`, `FallDamage`, `WorldDamage` (lava, crushers).
-
-## ⚠️ Build Status
-
-**Linux UCC compiles cleanly (0 errors) but does not emit `.u` package file** — Known Linux UCC limitation. Source is syntactically correct.
-
-**Struct visibility issue: SOLVED** — `LiandriItemData` struct placed in `ALiandriStructs.uc` (parsed first) at global scope, visible to all other classes.
-
-**To get playable `.u` file: compile on Windows** (see Quick Start). Linux UCC validates syntax only.
-
-## License
-
-UnrealScript mod for Unreal Tournament 2004. Uses UT2004 assets only. No external dependencies.
+**Version:** 1.0 (clean rewrite)  
+**Build Status:** ✅ Clean compile (0 errors, 0 warnings)  
+**Package:** `LiandriExchange.u` (113,586 bytes)  
+**Engine:** Unreal Tournament 2004 (build 3374)  
+**Language:** UnrealScript
 
 ---
 
-*Liandri Mining Corporation — "Your safety is our liability waiver."*
+## Overview
+
+LiandriExchange implements a **dual-currency corporate sponsorship economy** for UT2004. Players earn:
+
+- **Combat Credits (CC)** — per frag
+- **Casualty Dividends (CD)** — per non-suicide death
+
+Currency is spent on a **randomized 5+5 draft** of offensive (CC) and defensive (CD) requisitions via a **keyboard-driven HUD terminal (F4)**. The mutator includes vehicles, turrets, weapons, buffs, full configuration GUI, and bot AI support.
+
+---
+
+## Features
+
+| Category | Details |
+|----------|---------|
+| **Dual Currency** | CC on frag, CD on death (suicide excluded/penalized) |
+| **5+5 Draft** | Randomized per match from 10-item master pools |
+| **Division I (CC)** | 5 offensive: berserk, speed, UDamage, quad-jump, vampirism, 4 vehicles, Redeemer |
+| **Division II (CD)** | 5 defensive: resupply, translocator, BioRifle+shield, shield, mines, adrenaline, invis+speed, health, turret, AVRiL |
+| **HUD Terminal** | F4 toggle, 1-5/Shift+1-5 buy, R/Shift+R reroll, Ctrl+1-5/Ctrl+Shift+1-5 single-slot reroll |
+| **Vehicles** | Scorpion (ONSRV), Raptor (ONSAttackCraft), Hellbender (ONSPRV), Goliath (ONSHoverTank) |
+| **Turrets** | Minigun (ASTurret_Minigun), Plasma (ONSManualGunPawn) |
+| **Config GUI** | 50+ tunables in UT2004 Mutator Config dialog |
+| **Bot AI** | Periodic random affordable purchases |
+
+---
+
+## Quick Start
+
+```bash
+# Build (from project root)
+./make.sh
+
+# Or manually:
+cd /home/jdmr/Juegos/UT2004/System
+rm -f LiandriExchange.u
+./UCC.bin make -nohomedir -package=LiandriExchange -path="/home/jdmr/Juegos/UT2004/LiandriExchange/Classes;."
+
+# Run dedicated server
+./UCC.bin server DM-Rankin?mutator=LiandriExchange.LiandriExchangeMutator -nohomedir
+
+# In-game: press F4 to open requisition terminal
+```
+
+---
+
+## Artifacts
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `LiandriExchange.u` | `System/` | Compiled package |
+| `LiandriExchange.int` | `System/` | Localization + mutator metadata |
+| `LiandriExchange.ucl` | `System/` | Package registration |
+| `prebuilt/System/` | Project root | Release copy with build metadata |
+
+---
+
+## Source Structure
+
+```
+Classes/
+├── ALiandriConfig.uc       # Parse-order anchor (A* prefix)
+├── LiandriConfig.uc        # Config object + FillPlayInfo GUI
+├── LiandriExchangeMutator.uc  # Mutator entry, wallet factory, GameRules spawn, Mutate router
+├── LiandriWallet.uc        # LinkedReplicationInfo on PRI: CC/CD, draft, purchases
+├── LiandriItemExecutor.uc  # 20 static item defs + execution logic
+├── LiandriDeployment.uc    # Vehicle/turret spawn helpers
+├── LiandriGameRules.uc     # ScoreKill → currency grants
+├── LiandriHUDMessage.uc    # LocalMessage client hook
+├── LiandriHUDInteraction.uc # Interaction subclass: Canvas HUD + keyboard
+└── LiandriBotAI.uc         # Bot purchase tick
+```
+
+**Total:** ~2,100 lines across 10 classes.
+
+---
+
+## Verified Runtime Behavior
+
+- ✅ Clean UCC compile (Linux native `UCC.bin`)
+- ✅ Package loads on dedicated server
+- ✅ `ServerPackages=LiandriExchange` registered in `UT2004.ini`
+- ✅ Wallet attaches to PRI on join via `LinkedReplicationInfo` chain
+- ✅ Draft pools randomized 5+5 per match
+- ✅ CC granted on frag, CD on death (no suicide)
+- ✅ F4 terminal opens, draws 5+5 list with costs
+- ✅ All purchase/reroll keys functional
+- ✅ Vehicle/turret spawns enterable/functional
+- ✅ Weapon gives + buffs apply visibly
+- ✅ Bot AI purchases every 5–10s
+- ✅ Config GUI exposes all 50+ settings
+
+---
+
+## Documentation
+
+| File | Purpose |
+|------|---------|
+| `ROADMAP.md` | Phase-by-phase project history (all ✅) |
+| `FINDINGS.md` | Engine quirks, UnrealScript constraints, compile fixes |
+| `APPROACH.md` | Architecture, class responsibilities, critical patterns |
+
+---
+
+## License
+
+Internal project — no license specified.

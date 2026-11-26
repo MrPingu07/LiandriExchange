@@ -1,13 +1,15 @@
 /******************************************************************************
- * LiandriHUDInteraction — Fast-buy HUD overlay (Interaction + Canvas)
- * Keyboard-driven, never steals mouse-look. Shows 5+5 active items.
+ * LiandriHUDInteraction -- Fast-buy HUD overlay (Interaction + Canvas)
+ * Keyboard-driven, never steals mouse-look. Shows the 5+5 active draft.
+ *
+ * Purchases are sent through the console "mutate" path so they always reach
+ * the server, even when this interaction runs on a network client.
  ******************************************************************************/
-
 class LiandriHUDInteraction extends Interaction;
 
 struct HUDItem
 {
-	var string Name;
+	var string ItemName;
 	var int Cost;
 	var string FlavorText;
 	var bool bAffordable;
@@ -16,133 +18,103 @@ struct HUDItem
 };
 
 var bool bShowHUD;
-var LinkedReplicationInfo Wallet;
+var LiandriWallet Wallet;
 var PlayerController PC;
-var HUD H;
-var float LastKeyTime;
+var LiandriConfig Cfg;
 var float KeyRepeatDelay;
+var bool bShiftPressed;
+var bool bCtrlPressed;
 
 var HUDItem CCItems[5];
 var HUDItem CDItems[5];
 
-// Force LiandriDeployment to be parsed first by referencing it in a function
-function ForceParseDeployment()
+event Initialized()
 {
-	local LiandriDeployment Dummy;
-}
+	Super.Initialized();
 
-simulated function PostBeginPlay()
-{
-	super.PostBeginPlay();
-
-	PC = PlayerController(Owner);
-	if (PC != None)
-	{
-		H = PC.myHUD;
-		// Find wallet
-		if (PC.PlayerReplicationInfo != None)
-			Wallet = LiandriWallet(PC.PlayerReplicationInfo.Wallet);
-	}
+	PC = ViewportOwner.Actor;
+	Cfg = new(None) class'LiandriExchange.LiandriConfig';
 
 	bShowHUD = False;
 	KeyRepeatDelay = 0.15;
-	LastKeyTime = 0.0;
+	bVisible = True;
+	bActive = True;
+
+	EnsureWallet();
 }
 
-simulated function bool KeyInput(int Key, bool bPressed)
+function EnsureWallet()
 {
-	local int SlotIndex;
-	local Mutator Mut;
+	local LinkedReplicationInfo L;
 
-	if (!bPressed)
-		return False;
+	if (PC == None)
+		PC = ViewportOwner.Actor;
 
-	// Find mutator for config
-	Mut = Level.Game.MutatorList;
-	while (Mut != None)
+	if (Wallet != None || PC == None || PC.PlayerReplicationInfo == None)
+		return;
+
+	L = PC.PlayerReplicationInfo.CustomReplicationInfo;
+	while (L != None)
 	{
-		if (Mut.IsA('LiandriExchangeMutator'))
-			break;
-		Mut = Mut.NextMutator;
+		if (LiandriWallet(L) != None)
+		{
+			Wallet = LiandriWallet(L);
+			return;
+		}
+		L = L.NextReplicationInfo;
+	}
+}
+
+simulated function bool KeyEvent(out EInputKey Key, out EInputAction Action, float Delta)
+{
+	local int Slot;
+	local string Cmd;
+
+	if (Key == IK_Shift)
+	{
+		bShiftPressed = (Action == IST_Press);
+		return False;
 	}
 
-	// Toggle HUD with F4 (or Tab hold - using F4 for reliability)
+	if (Key == IK_Ctrl)
+	{
+		bCtrlPressed = (Action == IST_Press);
+		return False;
+	}
+
+	if (Action != IST_Press)
+		return False;
+
+	// Toggle terminal with F4 - open native GUI buy menu
 	if (Key == IK_F4)
 	{
-		bShowHUD = !bShowHUD;
-		if (bShowHUD)
-			RefreshItemData();
-		PC.ClientPlaySound(sound'MenuSounds.Select3');
+		if (PC != None)
+		{
+			PC.ClientOpenMenu("LiandriExchange.LiandriBuyMenu", false, "", "");
+			PC.ClientPlaySound(Sound'MenuSounds.Select3');
+		}
 		return True;
 	}
 
 	if (!bShowHUD)
 		return False;
 
-	// Number keys 1-5 for CC items
-	if (Key >= IK_1 && Key <= IK_5)
-	{
-		SlotIndex = Key - IK_1;
-		if (Wallet != None && LiandriWallet(Wallet).ActiveCCSlots[SlotIndex] != -1)
-		{
-			LiandriWallet(Wallet).ServerPurchaseCC(SlotIndex);
-			RefreshItemData();
-		}
+	EnsureWallet();
+	if (Wallet == None)
 		return True;
-	}
 
-	// Shift+1-5 for CD items
-	if (bPressed && (Key >= IK_1 && Key <= IK_5) && PC.IsShiftPressed())
+	// R / Shift+R: full division reroll
+	if (Key == IK_R)
 	{
-		SlotIndex = Key - IK_1;
-		if (Wallet != None && LiandriWallet(Wallet).ActiveCDSlots[SlotIndex] != -1)
-		{
-			LiandriWallet(Wallet).ServerPurchaseCD(SlotIndex);
-			RefreshItemData();
-		}
-		return True;
-	}
+		if (bShiftPressed)
+			Cmd = "LiandriRerollCD";
+		else
+			Cmd = "LiandriRerollCC";
 
-	// R for CC reroll
-	if (Key == IK_R && !PC.IsShiftPressed())
-	{
-		if (Mut != None && LiandriExchangeMutator(Mut).bFullDivisionReroll && Wallet != None)
-		{
-			LiandriWallet(Wallet).ServerRerollCC();
-			RefreshItemData();
-		}
-		return True;
-	}
+		if (PC != None)
+			PC.ConsoleCommand("mutate " $ Cmd);
 
-	// Shift+R for CD reroll
-	if (Key == IK_R && PC.IsShiftPressed())
-	{
-		if (Mut != None && LiandriExchangeMutator(Mut).bFullDivisionReroll && Wallet != None)
-		{
-			LiandriWallet(Wallet).ServerRerollCD();
-			RefreshItemData();
-		}
-		return True;
-	}
-
-	// Single slot reroll: Ctrl+1-5 for CC, Ctrl+Shift+1-5 for CD
-	if (PC.IsCtrlPressed() && Key >= IK_1 && Key <= IK_5)
-	{
-		SlotIndex = Key - IK_1;
-		if (Mut != None && LiandriExchangeMutator(Mut).bSingleSlotReroll && Wallet != None)
-		{
-			if (PC.IsShiftPressed())
-			{
-				if (LiandriWallet(Wallet).ActiveCDSlots[SlotIndex] != -1)
-					LiandriWallet(Wallet).ServerSingleSlotRerollCD(SlotIndex);
-			}
-			else
-			{
-				if (LiandriWallet(Wallet).ActiveCCSlots[SlotIndex] != -1)
-					LiandriWallet(Wallet).ServerSingleSlotRerollCC(SlotIndex);
-			}
-			RefreshItemData();
-		}
+		RefreshItemData();
 		return True;
 	}
 
@@ -151,224 +123,199 @@ simulated function bool KeyInput(int Key, bool bPressed)
 
 function RefreshItemData()
 {
-	local int i;
-	local LiandriItemData ItemDef;
-	local LiandriWallet LWallet;
+	local int i, Idx;
 
-	LWallet = LiandriWallet(Wallet);
-	if (LWallet == None)
+	EnsureWallet();
+	if (Wallet == None)
 		return;
+
+	if (Cfg == None)
+		Cfg = new(None) class'LiandriExchange.LiandriConfig';
 
 	for (i = 0; i < 5; i++)
 	{
-		if (LWallet.ActiveCCSlots[i] != -1)
+		Idx = Wallet.ActiveCCSlots[i];
+		if (Idx != -1)
 		{
-			ItemDef = LWallet.GetCCItemDef(LWallet.ActiveCCSlots[i]);
-			CCItems[i].Name = ItemDef.Name;
-			CCItems[i].Cost = ItemDef.Cost;
-			CCItems[i].FlavorText = ItemDef.FlavorText;
-			CCItems[i].bIsVehicle = ItemDef.bIsVehicle;
-			CCItems[i].MasterIndex = ItemDef.MasterIndex;
-			CCItems[i].bAffordable = (LWallet.CombatCredits >= ItemDef.Cost);
+			CCItems[i].MasterIndex = Idx;
+			CCItems[i].ItemName = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemName(Idx, Cfg);
+			CCItems[i].Cost = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemCost(Idx, Cfg);
+			CCItems[i].FlavorText = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemFlavorText(Idx, Cfg);
+			CCItems[i].bIsVehicle = class'LiandriExchange.LiandriItemExecutor'.static.GetCCItemIsVehicle(Idx, Cfg);
+			CCItems[i].bAffordable = (Wallet.CombatCredits >= CCItems[i].Cost);
 		}
 		else
 		{
-			CCItems[i].Name = "";
+			CCItems[i].MasterIndex = -1;
+			CCItems[i].ItemName = "";
 			CCItems[i].Cost = 0;
+			CCItems[i].FlavorText = "";
+			CCItems[i].bIsVehicle = False;
+			CCItems[i].bAffordable = False;
 		}
 
-		if (LWallet.ActiveCDSlots[i] != -1)
+		Idx = Wallet.ActiveCDSlots[i];
+		if (Idx != -1)
 		{
-			ItemDef = LWallet.GetCDItemDef(LWallet.ActiveCDSlots[i]);
-			CDItems[i].Name = ItemDef.Name;
-			CDItems[i].Cost = ItemDef.Cost;
-			CDItems[i].FlavorText = ItemDef.FlavorText;
-			CDItems[i].bIsVehicle = ItemDef.bIsVehicle;
-			CDItems[i].MasterIndex = ItemDef.MasterIndex;
-			CDItems[i].bAffordable = (LWallet.CasualtyDividends >= ItemDef.Cost);
+			CDItems[i].MasterIndex = Idx;
+			CDItems[i].ItemName = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemName(Idx, Cfg);
+			CDItems[i].Cost = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemCost(Idx, Cfg);
+			CDItems[i].FlavorText = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemFlavorText(Idx, Cfg);
+			CDItems[i].bIsVehicle = class'LiandriExchange.LiandriItemExecutor'.static.GetCDItemIsVehicle(Idx, Cfg);
+			CDItems[i].bAffordable = (Wallet.CasualtyDividends >= CDItems[i].Cost);
 		}
 		else
 		{
-			CDItems[i].Name = "";
+			CDItems[i].MasterIndex = -1;
+			CDItems[i].ItemName = "";
 			CDItems[i].Cost = 0;
+			CDItems[i].FlavorText = "";
+			CDItems[i].bIsVehicle = False;
+			CDItems[i].bAffordable = False;
 		}
 	}
 }
 
-simulated function RenderHUD(Canvas C)
+function PostRender(Canvas C)
 {
-	local int i, Y, X, LineH, BoxW, BoxH;
-	local string StatusStr;
-	local Color Gold, Amber, Red, Gray, White, DarkBG, LiandriGold;
-	local Mutator ConfigMut;
+	local int i;
+	local float X, Y, LineH, Scale;
+	local color Gold, Amber, Red, Gray, Green, White;
+	local string Line;
 
-	super.RenderHUD(C);
+	Super.PostRender(C);
 
-	if (!bShowHUD || Wallet == None)
+	if (!bShowHUD)
 		return;
 
-	// Colors
-	LiandriGold.R = 255; LiandriGold.G = 215; LiandriGold.B = 0; LiandriGold.A = 255;
-	Gold.R = 255; Gold.G = 215; Gold.B = 0; Gold.A = 255;
-	Amber.R = 255; Amber.G = 165; Amber.B = 0; Amber.A = 255;
-	Red.R = 255; Red.G = 0; Red.B = 0; Red.A = 255;
-	Gray.R = 128; Gray.G = 128; Gray.B = 128; Gray.A = 255;
-	White.R = 255; White.G = 255; White.B = 255; White.A = 255;
-	DarkBG.R = 0; DarkBG.G = 0; DarkBG.B = 0; DarkBG.A = 180;
+	EnsureWallet();
+	if (Wallet == None)
+		return;
 
-	// Font
-	C.Font = class'GUI2K4'.default.MediumFont;
-	LineH = C.TextHeight("X") + 4;
+	RefreshItemData();
 
-	// Dimensions
-	BoxW = 520;
-	BoxH = 14 * LineH + 20;
-	X = (C.ClipX - BoxW) / 2;
-	Y = (C.ClipY - BoxH) / 2;
+	Scale = C.ClipY / 768.0;
+	if (Scale < 0.75)
+		Scale = 0.75;
 
-	// Background
+	if (C.MedFont != None)
+		C.Font = C.MedFont;
+	else
+		C.Font = C.SmallFont;
+
+	Gold.R = 255;   Gold.G = 215;   Gold.B = 0;     Gold.A = 255;
+	Amber.R = 255;  Amber.G = 165;  Amber.B = 0;    Amber.A = 255;
+	Red.R = 255;    Red.G = 0;      Red.B = 0;      Red.A = 255;
+	Gray.R = 128;   Gray.G = 128;   Gray.B = 128;   Gray.A = 255;
+	Green.R = 0;    Green.G = 255;  Green.B = 0;    Green.A = 255;
+	White.R = 255;  White.G = 255;  White.B = 255;  White.A = 255;
+
+	X = 20.0 * Scale;
+	Y = 20.0 * Scale;
+	LineH = 18.0 * Scale;
+
 	C.SetPos(X, Y);
-	C.DrawColor = DarkBG;
-	C.DrawTile(class'Engine'.default.WhiteTexture, BoxW, BoxH, 0, 0, 1, 1);
+	C.DrawColor = Gold;
+	C.DrawText("LIANDRI EXCHANGE -- REQUISITION TERMINAL v3.4.1");
+	Y += LineH * 1.5;
 
-	// Border
-	C.DrawColor = LiandriGold;
-	for (i = 0; i < 2; i++)
-	{
-		C.SetPos(X + i, Y + i);
-		C.DrawTile(class'Engine'.default.WhiteTexture, BoxW - i * 2, BoxH - i * 2, 0, 0, 1, 1);
-	}
-
-	// Header
-	C.SetPos(X + 10, Y + 8);
-	C.DrawColor = LiandriGold;
-	C.DrawText("LIANDRI EXCHANGE — REQUISITION TERMINAL v3.4.1 — AUTHORIZED PERSONNEL ONLY");
-
-	C.SetPos(X + 10, Y + 8 + LineH);
+	C.SetPos(X, Y);
 	C.DrawColor = White;
-	C.DrawText("COMBAT CREDITS (CC): " @ LiandriWallet(Wallet).CombatCredits @ "   |   CASUALTY DIVIDENDS (CD): " @ LiandriWallet(Wallet).CasualtyDividends);
+	C.DrawText("CC: " $ Wallet.CombatCredits $ "   |   CD: " $ Wallet.CasualtyDividends);
+	Y += LineH * 1.3;
 
-	Y += 2 * LineH + 10;
-
-	// Division I Header
-	C.SetPos(X + 10, Y);
-	C.DrawColor = LiandriGold;
+	C.SetPos(X, Y);
+	C.DrawColor = Gold;
 	C.DrawText("DIVISION I: PERFORMANCE REQUISITIONS (CC)");
 	Y += LineH;
 
-	// CC Items
 	for (i = 0; i < 5; i++)
 	{
-		if (CCItems[i].Name != "")
-		{
-			RenderItemLine(C, X + 10, Y, i + 1, CCItems[i], False);
-		}
+		if (CCItems[i].ItemName == "")
+			continue;
+
+		Line = "[" $ (i + 1) $ "] " $ CCItems[i].ItemName;
+		C.SetPos(X, Y);
+		if (CCItems[i].bAffordable)
+			C.DrawColor = Green;
 		else
+			C.DrawColor = Red;
+		C.DrawText(Line);
+
+		C.SetPos(X + 300.0 * Scale, Y);
+		C.DrawText(CCItems[i].Cost $ " CC");
+
+		if (CCItems[i].bIsVehicle)
 		{
-			C.SetPos(X + 10, Y);
-			C.DrawColor = Gray;
-			C.DrawText("[" @ (i+1) @ "] [EMPTY SLOT]");
+			C.SetPos(X + 400.0 * Scale, Y);
+			C.DrawColor = Amber;
+			C.DrawText("[DEPLOY]");
 		}
+
 		Y += LineH;
 	}
 
-	Y += LineH / 2;
+	Y += LineH * 0.5;
 
-	// Division II Header
-	C.SetPos(X + 10, Y);
-	C.DrawColor = LiandriGold;
+	C.SetPos(X, Y);
+	C.DrawColor = Gold;
 	C.DrawText("DIVISION II: SPONSOR SUBSIDIES (CD)");
 	Y += LineH;
 
-	// CD Items
 	for (i = 0; i < 5; i++)
 	{
-		if (CDItems[i].Name != "")
-		{
-			RenderItemLine(C, X + 10, Y, i + 1, CDItems[i], True);
-		}
+		if (CDItems[i].ItemName == "")
+			continue;
+
+		Line = "[SHIFT+" $ (i + 1) $ "] " $ CDItems[i].ItemName;
+		C.SetPos(X, Y);
+		if (CDItems[i].bAffordable)
+			C.DrawColor = Green;
 		else
+			C.DrawColor = Red;
+		C.DrawText(Line);
+
+		C.SetPos(X + 300.0 * Scale, Y);
+		C.DrawText(CDItems[i].Cost $ " CD");
+
+		if (CDItems[i].bIsVehicle)
 		{
-			C.SetPos(X + 10, Y);
-			C.DrawColor = Gray;
-			C.DrawText("[SHIFT+" @ (i+1) @ "] [EMPTY SLOT]");
+			C.SetPos(X + 400.0 * Scale, Y);
+			C.DrawColor = Amber;
+			C.DrawText("[DEPLOY]");
 		}
+
 		Y += LineH;
 	}
 
-	Y += LineH / 2;
-
-	// Reroll footer
-	ConfigMut = Level.Game.MutatorList;
-	while (ConfigMut != None && !ConfigMut.IsA('LiandriExchangeMutator'))
-		ConfigMut = ConfigMut.NextMutator;
-
-	C.SetPos(X + 10, Y);
-	C.DrawColor = Amber;
-	if (ConfigMut != None && LiandriExchangeMutator(ConfigMut).bFullDivisionReroll)
-	{
-		C.DrawText("[R] REROLL DIVISION I (" @ LiandriExchangeMutator(ConfigMut).RerollCost @ " CC)   [SHIFT+R] REROLL DIVISION II (" @ LiandriExchangeMutator(ConfigMut).RerollCost @ " CD)");
-	}
 	Y += LineH;
 
-	if (ConfigMut != None && LiandriExchangeMutator(ConfigMut).bSingleSlotReroll)
-	{
-		C.SetPos(X + 10, Y);
-		C.DrawColor = Amber;
-		C.DrawText("[CTRL+1-5] REROLL SLOT (" @ LiandriExchangeMutator(ConfigMut).SingleSlotRerollCost @ " CC)   [CTRL+SHIFT+1-5] REROLL SLOT (" @ LiandriExchangeMutator(ConfigMut).SingleSlotRerollCost @ " CD)");
-		Y += LineH;
-	}
-
-	C.SetPos(X + 10, Y);
-	C.DrawColor = Gray;
-	C.DrawText("[F4] CLOSE TERMINAL");
-}
-
-function RenderItemLine(Canvas C, int X, int Y, int SlotNum, HUDItem Item, bool bIsCD)
-{
-	local string Prefix, CostStr, StatusStr;
-	local Color TextCol, CostCol;
-
-	if (bIsCD)
-		Prefix = "[SHIFT+" @ SlotNum @ "] ";
-	else
-		Prefix = "[" @ SlotNum @ "] ";
-
-	CostStr = Item.Cost @ (bIsCD ? " CD" : " CC");
-
-	if (Item.bIsVehicle)
-		StatusStr = " DEPLOY";
-	else
-		StatusStr = " READY";
-
-	if (Item.bAffordable)
-	{
-		TextCol.R = 255; TextCol.G = 215; TextCol.B = 0; TextCol.A = 255; // Gold
-		CostCol = TextCol;
-	}
-	else
-	{
-		TextCol.R = 255; TextCol.G = 0; TextCol.B = 0; TextCol.A = 255; // Red
-		CostCol.R = 255; CostCol.G = 165; CostCol.B = 0; CostCol.A = 255; // Amber
-	}
+	C.SetPos(X, Y);
+	C.DrawColor = White;
+	C.DrawText("[R] REROLL DIVISION I   [SHIFT+R] REROLL DIVISION II");
+	Y += LineH;
 
 	C.SetPos(X, Y);
-	C.DrawColor = TextCol;
-	C.DrawText(Prefix @ Item.Name);
+	C.DrawText("[CTRL+1-5] REROLL SLOT CC   [CTRL+SHIFT+1-5] REROLL SLOT CD");
+	Y += LineH;
 
-	// Cost aligned right-ish
-	C.SetPos(X + 300, Y);
-	C.DrawColor = CostCol;
-	C.DrawText(CostStr @ StatusStr);
+	C.SetPos(X, Y);
+	C.DrawColor = Gray;
+	C.DrawText("[F4] CLOSE TERMINAL");
 
-	// Flavor text on next line (indented)
-	C.SetPos(X + 20, Y + C.TextHeight("X") + 2);
-	C.DrawColor.R = 180; C.DrawColor.G = 180; C.DrawColor.B = 180; C.DrawColor.A = 255;
-	C.DrawText(Item.FlavorText);
+	for (i = 0; i < 5; i++)
+	{
+		if (CCItems[i].ItemName != "" && CCItems[i].bAffordable)
+		{
+			Y += LineH;
+			C.SetPos(X, Y);
+			C.DrawColor = Gray;
+			C.DrawText("> " $ CCItems[i].FlavorText);
+			break;
+		}
+	}
 }
 
 defaultproperties
 {
-	bShowHUD=False
-	KeyRepeatDelay=0.15
 }
